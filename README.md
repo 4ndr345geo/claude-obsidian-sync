@@ -3,15 +3,56 @@
 Synchronisiert deinen Obsidian-Vault über **dein eigenes Google Drive** auf allen Geräten:
 Windows, macOS, Linux, Android, iPhone und iPad.
 
-## So werden Konflikte vermieden
+## So werden Konflikte vermieden: 3-Wege-Merge
+
+Für jede Notiz merkt sich das Plugin die Version der letzten Synchronisierung (die *Basis*).
+Wurde eine Notiz auf zwei Geräten geändert, vergleicht es **beide neuen Versionen mit der Basis**
+und weiß so genau, was auf welchem Gerät geändert wurde.
 
 | Situation | Was passiert |
 |---|---|
 | Notiz auf einem Gerät geändert | wird automatisch auf die anderen übertragen |
-| Dieselbe Notiz auf zwei Geräten an **verschiedenen Stellen** geändert | Änderungen werden **automatisch zusammengeführt** (3-Wege-Merge) |
-| Dieselbe **Zeile** auf zwei Geräten geändert | Neuere Version behält den Namen, ältere wird als `Notiz (Konflikt Handy 2026-11-03 14-05).md` gespeichert. **Es geht nie etwas verloren.** |
-| Auf Gerät A gelöscht, auf Gerät B bearbeitet | Bearbeitete Version bleibt erhalten |
+| **Unkritisch:** verschiedene Stellen derselben Notiz geändert (z. B. Laptop oben, Handy unten) | wird **automatisch zusammengeführt** |
+| **Unkritisch:** auf beiden Geräten dieselbe Änderung | wird einfach übernommen |
+| **Kritisch:** dieselbe Stelle auf beiden Geräten unterschiedlich geändert | **beide Versionen werden in der Notiz markiert**, siehe unten |
+| Bild, PDF o. Ä. auf zwei Geräten geändert | neuere Version behält den Namen, ältere wird als `bild (Konflikt Handy 2026-11-03 14-05).png` gespeichert |
+| Auf Gerät A gelöscht, auf Gerät B bearbeitet | bearbeitete Version bleibt erhalten |
 | Datei gelöscht | landet im Papierkorb (Obsidian bzw. Google Drive, 30 Tage wiederherstellbar) |
+
+### Wie kritische Stellen markiert werden
+
+Alles Unkritische ist schon zusammengeführt. Nur die kritische Stelle erscheint als Warn-Kasten,
+die neuere Version steht oben:
+
+```markdown
+# Einkauf am Markt          ← Änderung vom Handy übernommen
+
+- Milch
+- Brot
+- Käse                      ← Änderung vom Laptop übernommen
+
+> [!warning] Sync-Konflikt
+> Diese Stelle wurde auf zwei Geräten unterschiedlich geändert. Behalte die richtige Version und lösche diesen Kasten.
+>
+> **Laptop · 03.11.2026 14:07**
+>
+> Termin: Dienstag
+>
+> **Handy · 03.11.2026 13:50**
+>
+> Termin: Mittwoch
+```
+
+Du behältst die richtige Zeile und löschst den Kasten. Fertig.
+
+- **In Codeblöcken** wird statt des Kastens die Markierung `<<<<<<< … ======= … >>>>>>>` verwendet,
+  weil ein Kasten dort nicht angezeigt würde.
+- **In den Eigenschaften (Frontmatter)** wird die neuere Version übernommen, damit die
+  Eigenschaften gültig bleiben. Der Kasten mit der anderen Version erscheint direkt darunter.
+- Zwei Änderungen in **direkt benachbarten Zeilen** gelten als eine Stelle (wie bei Git), weil es
+  dort oft um denselben Zusammenhang geht.
+- Der Befehl **„Notizen mit Sync-Konflikten anzeigen“** listet alle Notizen, in denen noch ein
+  Kasten steht.
 
 Änderungen werden anhand von Prüfsummen (MD5) erkannt, nicht anhand der Uhrzeit. Falsch gehende
 Geräteuhren können also nichts kaputt machen.
@@ -91,7 +132,7 @@ npm run build   # erzeugt main.js
 
 Aufbau:
 - `src/plan.ts`: entscheidet pro Datei, was zu tun ist (3-Wege-Vergleich, reine Logik)
-- `src/merge.ts`: Zusammenführen von Textänderungen, Namen für Konfliktkopien
+- `src/merge.ts`: 3-Wege-Merge mit Markdown-gerechter Markierung kritischer Stellen
 - `src/sync.ts`: führt den Plan aus
 - `src/drive.ts`: Google Drive API (v3)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode

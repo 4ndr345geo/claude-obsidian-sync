@@ -1,4 +1,16 @@
-import { App, debounce, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile } from "obsidian";
+import {
+	App,
+	debounce,
+	FuzzySuggestModal,
+	Notice,
+	Platform,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	TAbstractFile,
+	TFile,
+} from "obsidian";
+import { hasConflictMarkers } from "./merge";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { DriveClient } from "./drive";
 import { SyncEngine, SyncResult, SyncState } from "./sync";
@@ -75,6 +87,12 @@ export default class DriveSyncPlugin extends Plugin {
 			id: "sync-now",
 			name: "Jetzt mit Google Drive synchronisieren",
 			callback: () => this.sync(true),
+		});
+
+		this.addCommand({
+			id: "show-conflicts",
+			name: "Notizen mit Sync-Konflikten anzeigen",
+			callback: () => this.showConflicts(),
 		});
 
 		this.statusEl = this.addStatusBarItem();
@@ -163,9 +181,19 @@ export default class DriveSyncPlugin extends Plugin {
 		if (r.downloaded) parts.push(`↓ ${r.downloaded}`);
 		if (r.deleted) parts.push(`🗑 ${r.deleted}`);
 		if (r.merged) parts.push(`${r.merged} zusammengeführt`);
+		if (r.marked.length) {
+			const n = new Notice(
+				`Google Drive Sync: In ${r.marked.length} Notiz(en) wurde dieselbe Stelle auf zwei Geräten geändert. ` +
+					`Beide Versionen sind in der Notiz markiert (⚠ Sync-Konflikt):\n` +
+					r.marked.join("\n") +
+					"\n\nKlicken zum Öffnen.",
+				20000
+			);
+			n.noticeEl.addEventListener("click", () => this.openNote(r.marked[0]));
+		}
 		if (r.conflicts.length) {
 			new Notice(
-				`Google Drive Sync: ${r.conflicts.length} Konflikt(e). Die ältere Version wurde gespeichert als:\n` +
+				`Google Drive Sync: ${r.conflicts.length} Konflikt(e). Die ältere Version der Datei wurde gespeichert als:\n` +
 					r.conflicts.join("\n"),
 				15000
 			);
@@ -177,6 +205,23 @@ export default class DriveSyncPlugin extends Plugin {
 		if (manual || (this.settings.showNotices && parts.length)) {
 			new Notice(`Google Drive Sync: ${parts.length ? parts.join(" · ") : "Alles aktuell ✓"}`);
 		}
+	}
+
+	async openNote(path: string) {
+		const f = this.app.vault.getAbstractFileByPath(path);
+		if (f instanceof TFile) await this.app.workspace.getLeaf(false).openFile(f);
+	}
+
+	async showConflicts() {
+		const files: TFile[] = [];
+		for (const f of this.app.vault.getMarkdownFiles()) {
+			if (hasConflictMarkers(await this.app.vault.cachedRead(f))) files.push(f);
+		}
+		if (!files.length) {
+			new Notice("Keine offenen Sync-Konflikte ✓");
+			return;
+		}
+		new ConflictListModal(this.app, files, (f) => this.openNote(f.path)).open();
 	}
 
 	renderStatus() {
@@ -222,6 +267,22 @@ export default class DriveSyncPlugin extends Plugin {
 
 	async saveAll() {
 		await this.saveData({ settings: this.settings, state: this.state } satisfies PluginData);
+	}
+}
+
+class ConflictListModal extends FuzzySuggestModal<TFile> {
+	constructor(app: App, private files: TFile[], private choose: (f: TFile) => void) {
+		super(app);
+		this.setPlaceholder(`${files.length} Notiz(en) mit Sync-Konflikten – auswählen zum Öffnen`);
+	}
+	getItems() {
+		return this.files;
+	}
+	getItemText(f: TFile) {
+		return f.path;
+	}
+	onChooseItem(f: TFile) {
+		this.choose(f);
 	}
 }
 

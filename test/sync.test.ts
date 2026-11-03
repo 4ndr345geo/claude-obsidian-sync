@@ -42,22 +42,42 @@ test("Änderungen an verschiedenen Stellen werden automatisch zusammengeführt",
   assert.equal(a.vault.text("n.md"), expected);
 });
 
-test("echter Konflikt: nichts geht verloren, Konfliktkopie wird überall angelegt", async () => {
+test("kritische Änderung: wird in der Notiz markiert, nichts geht verloren", async () => {
   const { a, b } = setup();
-  a.vault.set("n.md", buf("Original"));
+  a.vault.set("n.md", buf("Einleitung\n\nOriginal\nSchluss"));
   await a.sync(); await b.sync();
-  a.vault.set("n.md", buf("Laptop-Text"));
-  b.vault.set("n.md", buf("Handy-Text")); // newer
+  a.vault.set("n.md", buf("Einleitung neu\n\nLaptop-Text\nSchluss"));
+  b.vault.set("n.md", buf("Einleitung\n\nHandy-Text\nSchluss")); // neuer
+  await a.sync();
+  const r = await b.sync();
+  await a.sync();
+  assert.deepEqual(r.marked, ["n.md"]);
+  for (const d of [a, b]) {
+    assert.equal(d.vault.getFiles().length, 1, "keine Konfliktkopie");
+    const t = d.vault.text("n.md")!;
+    assert.ok(t.startsWith("Einleitung neu\n"), "unkritische Änderung übernommen");
+    assert.match(t, /> \[!warning\] Sync-Konflikt/);
+    assert.ok(t.indexOf("> Handy-Text") < t.indexOf("> Laptop-Text"), "neuere Version zuerst");
+    assert.ok(t.endsWith("\nSchluss"));
+  }
+  assert.equal(a.vault.text("n.md"), b.vault.text("n.md"));
+});
+
+test("Bild-Konflikt: neuere Version bleibt, ältere als Kopie", async () => {
+  const { a, b } = setup();
+  a.vault.set("bild.png", new Uint8Array([1]).buffer);
+  await a.sync(); await b.sync();
+  a.vault.set("bild.png", new Uint8Array([2]).buffer);
+  b.vault.set("bild.png", new Uint8Array([3]).buffer);
   await a.sync();
   const r = await b.sync();
   await a.sync();
   assert.equal(r.conflicts.length, 1);
+  assert.match(r.conflicts[0], /^bild \(Konflikt Laptop .*\)\.png$/);
   for (const d of [a, b]) {
-    const texts = d.vault.getFiles().map((f) => d.vault.text(f.path)).sort();
-    assert.deepEqual(texts, ["Handy-Text", "Laptop-Text"], d.name);
-    assert.equal(d.vault.text("n.md"), "Handy-Text");
+    assert.deepEqual([...new Uint8Array(d.vault.data.get("bild.png")!)], [3]);
+    assert.equal(d.vault.getFiles().length, 2);
   }
-  assert.match(r.conflicts[0], /^n \(Konflikt Laptop .*\)\.md$/);
 });
 
 test("Löschen wird übertragen", async () => {
@@ -81,14 +101,16 @@ test("Bearbeiten schlägt Löschen: geänderte Datei bleibt erhalten", async () 
   assert.equal(b.vault.text("n.md"), "v2");
 });
 
-test("gleiche Datei gleichzeitig auf zwei Geräten neu angelegt", async () => {
+test("gleiche Notiz gleichzeitig auf zwei Geräten neu angelegt", async () => {
   const { a, b } = setup();
-  a.vault.set("Tagebuch/2026-11-03.md", buf("vom Laptop"));
-  b.vault.set("Tagebuch/2026-11-03.md", buf("vom Handy"));
+  a.vault.set("Tagebuch/2026-11-03.md", buf("# Tag\nvom Laptop"));
+  b.vault.set("Tagebuch/2026-11-03.md", buf("# Tag\nvom Handy"));
   await a.sync(); await b.sync(); await a.sync();
   for (const d of [a, b]) {
-    const texts = d.vault.getFiles().map((f) => d.vault.text(f.path)).sort();
-    assert.deepEqual(texts, ["vom Handy", "vom Laptop"], d.name);
+    assert.equal(d.vault.getFiles().length, 1);
+    const t = d.vault.text("Tagebuch/2026-11-03.md")!;
+    assert.ok(t.startsWith("# Tag\n"));
+    assert.ok(t.includes("vom Laptop") && t.includes("vom Handy"));
   }
 });
 

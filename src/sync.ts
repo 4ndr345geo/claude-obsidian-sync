@@ -23,6 +23,9 @@ export interface SyncResult {
 	downloaded: number;
 	deleted: number;
 	merged: number;
+	/** Notes in which critical changes were marked. */
+	marked: string[];
+	/** Conflict copies created (binary files). */
 	conflicts: string[];
 	errors: string[];
 }
@@ -69,7 +72,7 @@ export class SyncEngine {
 
 	async run(onProgress?: (msg: string) => void): Promise<SyncResult> {
 		const s = this.settings();
-		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, conflicts: [], errors: [] };
+		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [] };
 
 		if (!this.state.folderId || this.state.folderName !== s.folderName) {
 			this.state.folderId = await this.drive.ensureFolder(s.folderName);
@@ -209,25 +212,30 @@ export class SyncEngine {
 		const localData = await this.vault.readBinary(file);
 		const remoteData = await this.drive.download(remoteId);
 
-		// 1) Try an automatic three-way merge for text notes.
+		// 1) Text notes: three-way merge. Uncritical changes are combined,
+		//    critical ones are marked directly in the note.
 		if (isMergeable(path)) {
 			const dec = new TextDecoder();
 			const localText = dec.decode(localData);
 			const remoteText = dec.decode(remoteData);
 			const baseText = hasBase ? await this.readBaseText(path) : null;
-			if (baseText !== null) {
-				const m = mergeText(localText, baseText, remoteText);
-				if (m.clean) {
-					const merged = new TextEncoder().encode(m.text).buffer as ArrayBuffer;
-					if (m.text !== localText) await this.writeLocal(path, merged);
-					await this.uploadData(path, merged, remoteId);
-					r.merged++;
-					return;
-				}
-			}
+			const m = mergeText(
+				localText,
+				baseText,
+				remoteText,
+				{ label: this.settings().deviceName, time: file.stat.mtime },
+				{ label: remote?.device ?? "anderes Gerät", time: remote?.modifiedTime ?? 0 }
+			);
+			const merged = new TextEncoder().encode(m.text).buffer as ArrayBuffer;
+			if (m.text !== localText) await this.writeLocal(path, merged);
+			await this.uploadData(path, merged, remoteId);
+			if (m.clean) r.merged++;
+			else r.marked.push(path);
+			return;
 		}
 
-		// 2) Real conflict: the newer version keeps the name, the older one becomes a copy.
+		// 2) Binary files (images, PDFs …) cannot be merged:
+		//    the newer version keeps the name, the older one becomes a copy.
 		const remoteTime = remote?.modifiedTime ?? 0;
 		const localWins = file.stat.mtime >= remoteTime;
 		if (localWins) {
