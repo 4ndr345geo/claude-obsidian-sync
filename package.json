@@ -1,0 +1,29 @@
+{
+  "name": "gdrive-vault-sync",
+  "version": "1.0.0",
+  "description": "Obsidian plugin: sync vault via Google Drive",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc && node esbuild.config.mjs production",
+    "test": "node test/run.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/spark-md5": "^3.0.5",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.24.2",
+    "obsidian": "^1.14.4",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "node-diff3": "^3.2.1",
+    "spark-md5": "^3.0.2"
+  },
+  "private": true
+}

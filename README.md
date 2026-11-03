@@ -1,0 +1,98 @@
+# Google Drive Vault Sync (Obsidian-Plugin)
+
+Synchronisiert deinen Obsidian-Vault über **dein eigenes Google Drive** auf allen Geräten:
+Windows, macOS, Linux, Android, iPhone und iPad.
+
+## So werden Konflikte vermieden
+
+| Situation | Was passiert |
+|---|---|
+| Notiz auf einem Gerät geändert | wird automatisch auf die anderen übertragen |
+| Dieselbe Notiz auf zwei Geräten an **verschiedenen Stellen** geändert | Änderungen werden **automatisch zusammengeführt** (3-Wege-Merge) |
+| Dieselbe **Zeile** auf zwei Geräten geändert | Neuere Version behält den Namen, ältere wird als `Notiz (Konflikt Handy 2026-11-03 14-05).md` gespeichert. **Es geht nie etwas verloren.** |
+| Auf Gerät A gelöscht, auf Gerät B bearbeitet | Bearbeitete Version bleibt erhalten |
+| Datei gelöscht | landet im Papierkorb (Obsidian bzw. Google Drive, 30 Tage wiederherstellbar) |
+
+Änderungen werden anhand von Prüfsummen (MD5) erkannt, nicht anhand der Uhrzeit. Falsch gehende
+Geräteuhren können also nichts kaputt machen.
+
+Synchronisiert wird beim Start, 10 Sekunden nach dem Bearbeiten, alle 2 Minuten und beim
+Zurückkehren in die App (Handy). So sind die Geräte fast immer auf dem gleichen Stand.
+
+**Datenschutz:** Das Plugin nutzt die Berechtigung `drive.file`. Es sieht **nur die Dateien, die
+es selbst angelegt hat**, nicht den Rest deines Google Drive. Es gibt keinen fremden Server
+dazwischen: Die Daten gehen direkt von deinem Gerät zu Google.
+
+---
+
+## Einrichtung (einmalig, ca. 10 Minuten)
+
+### 1. Eigenen Google-Zugang anlegen
+
+1. Öffne <https://console.cloud.google.com/> und lege ein **neues Projekt** an (z. B. „Obsidian Sync“).
+2. **APIs & Dienste → Bibliothek** → „Google Drive API“ suchen → **Aktivieren**.
+3. **Google Auth Platform / OAuth-Zustimmungsbildschirm** → Erste Schritte:
+   - App-Name: z. B. „Obsidian Sync“, deine E-Mail eintragen
+   - Zielgruppe: **Extern**
+   - Unter **Datenzugriff** den Bereich `.../auth/drive.file` hinzufügen
+4. Unter **Zielgruppe** auf **„App veröffentlichen“** klicken (Status „In Produktion“).
+   > Wichtig: Im Status „Test“ läuft die Anmeldung nach 7 Tagen ab. Für `drive.file` ist keine
+   > Prüfung durch Google nötig. Bei der Anmeldung erscheint evtl. „Google hat diese App nicht
+   > überprüft“: Über **Erweitert → Weiter zu Obsidian Sync** geht es weiter. Es ist ja deine eigene App.
+5. **Clients → Client erstellen** → Anwendungstyp **Desktop-App** → Erstellen.
+   **Client-ID** und **Clientschlüssel** kopieren.
+
+### 2. Plugin installieren
+
+**Variante A, mit BRAT (empfohlen, funktioniert auch auf dem Handy):**
+Dieses Repository auf GitHub stellen und ein Release mit `main.js` und `manifest.json` anlegen.
+Dann in Obsidian das Community-Plugin **BRAT** installieren → „Add beta plugin“ → Repo-URL eingeben.
+
+**Variante B, manuell:** Den Ordner `<dein Vault>/.obsidian/plugins/gdrive-vault-sync/` anlegen
+und `main.js` und `manifest.json` hineinkopieren. Danach Obsidian neu laden und das Plugin unter
+*Einstellungen → Community-Plugins* aktivieren.
+
+### 3. Verbinden
+
+**Am Computer:** Einstellungen → *Google Drive Vault Sync* → Client-ID und Secret eintragen →
+**Verbinden**. Der Browser öffnet sich, du meldest dich bei Google an, fertig.
+
+**Auf Handy/Tablet:** Am Computer auf **„Code kopieren“** klicken, den Code z. B. per Notiz oder
+Messenger an dich selbst schicken und auf dem Handy unter **„Verbindungscode einfügen“**
+übernehmen. Danach den Code beim Messenger wieder löschen, er enthält deinen Zugang.
+
+### 4. Erste Synchronisierung, so geht nichts schief
+
+1. **Backup:** Den Vault-Ordner vorher einmal als ZIP sichern.
+2. Zuerst auf dem Gerät mit dem vollständigen Vault synchronisieren und warten, bis „✓“ erscheint.
+3. Auf den anderen Geräten am besten mit einem **leeren Vault** beginnen und dann synchronisieren.
+4. Den Vault **nicht zusätzlich** im Google-Drive-Desktop-Ordner, in iCloud, OneDrive usw.
+   speichern. Doppelte Synchronisierung erzeugt Konflikte.
+
+---
+
+## Gut zu wissen
+
+- In Google Drive liegen alle Dateien in einem Ordner (Standard: `Obsidian – <Vault-Name>`).
+  Der Dateiname entspricht dem Pfad im Vault, z. B. `Projekte/Idee.md`.
+- Der Ordner `.obsidian` (Einstellungen, Themes, Plugins) wird **nicht** synchronisiert. So kann
+  jedes Gerät eigene Einstellungen haben, und es gibt keine Konflikte mit `workspace.json`.
+- Umbenennen wird als „alte Datei löschen + neue anlegen“ übertragen.
+- Die Statusleiste unten zeigt den Zustand (`☁ ✓ vor 2 Min.`). Ein Klick darauf synchronisiert sofort.
+- Befehl: *„Jetzt mit Google Drive synchronisieren“* (auch per Tastenkürzel belegbar).
+
+## Entwicklung
+
+```bash
+npm install
+npm test        # Simulation mit zwei Geräten und einem Fake-Drive
+npm run build   # erzeugt main.js
+```
+
+Aufbau:
+- `src/plan.ts`: entscheidet pro Datei, was zu tun ist (3-Wege-Vergleich, reine Logik)
+- `src/merge.ts`: Zusammenführen von Textänderungen, Namen für Konfliktkopien
+- `src/sync.ts`: führt den Plan aus
+- `src/drive.ts`: Google Drive API (v3)
+- `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode
+- `src/main.ts`: Plugin, Einstellungen, automatische Auslöser
