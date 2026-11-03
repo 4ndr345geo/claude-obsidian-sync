@@ -137,3 +137,15 @@ Aufbau:
 - `src/drive.ts`: Google Drive API (v3)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode
 - `src/main.ts`: Plugin, Einstellungen, automatische Auslöser
+
+### Neue Version veröffentlichen
+
+1. Version in `manifest.json` und `package.json` erhöhen (z. B. `1.2.0`) und in `versions.json` ergänzen.
+2. Committen und pushen.
+3. Tag mit genau dieser Version anlegen und pushen (ohne „v“):
+   ```bash
+   git tag 1.2.0 && git push origin 1.2.0
+   ```
+
+GitHub Actions testet und baut das Plugin dann und legt das Release mit `main.js` und
+`manifest.json` an. BRAT installiert die neue Version danach automatisch auf allen Geräten.
