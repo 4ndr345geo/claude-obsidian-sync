@@ -141,11 +141,8 @@ Aufbau:
 ### Neue Version veröffentlichen
 
 1. Version in `manifest.json` und `package.json` erhöhen (z. B. `1.2.0`) und in `versions.json` ergänzen.
-2. Committen und pushen.
-3. Tag mit genau dieser Version anlegen und pushen (ohne „v“):
-   ```bash
-   git tag 1.2.0 && git push origin 1.2.0
-   ```
+2. Committen und auf `main` pushen.
 
-GitHub Actions testet und baut das Plugin dann und legt das Release mit `main.js` und
-`manifest.json` an. BRAT installiert die neue Version danach automatisch auf allen Geräten.
+GitHub Actions merkt, dass es zu dieser Version noch kein Release gibt, testet und baut das Plugin
+und legt Tag und Release mit `main.js` und `manifest.json` an. BRAT installiert die neue Version
+danach automatisch auf allen Geräten. Pushes ohne Versionsänderung erzeugen kein neues Release.

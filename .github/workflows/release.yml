@@ -1,10 +1,12 @@
 name: Release
 
-# Startet, wenn ein Versions-Tag (z. B. 1.2.0) hochgeladen wird.
+# Startet bei jedem Push auf main (und manuell über "Run workflow").
+# Gibt es zur Version in manifest.json noch kein Release, wird das Plugin
+# getestet, gebaut und das Release samt Tag automatisch angelegt.
 on:
   push:
-    tags:
-      - "*.*.*"
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,33 +17,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Version lesen und prüfen, ob es schon ein Release gibt
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node -p "require('./manifest.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION existiert bereits – nichts zu tun."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v4
+        if: steps.version.outputs.exists == 'false'
         with:
           node-version: 20
           cache: npm
 
       - name: Abhängigkeiten installieren
+        if: steps.version.outputs.exists == 'false'
         run: npm ci
 
-      - name: Tag muss zur Version in manifest.json passen
+      - name: Versionen müssen übereinstimmen
+        if: steps.version.outputs.exists == 'false'
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="$(node -p "require('./manifest.json').version")"
-          if [ "$TAG" != "$VERSION" ]; then
-            echo "::error::Tag '$TAG' passt nicht zur Version '$VERSION' in manifest.json"
-            exit 1
-          fi
+          V="${{ steps.version.outputs.version }}"
+          P="$(node -p "require('./package.json').version")"
+          node -e "if(!require('./versions.json')['$V']) process.exit(1)" \
+            || { echo "::error::Version $V fehlt in versions.json"; exit 1; }
+          [ "$P" = "$V" ] || { echo "::error::package.json ($P) und manifest.json ($V) unterscheiden sich"; exit 1; }
 
       - name: Tests
+        if: steps.version.outputs.exists == 'false'
         run: npm test
 
       - name: Bauen
+        if: steps.version.outputs.exists == 'false'
         run: npm run build
 
       - name: Release erstellen
+        if: steps.version.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" main.js manifest.json \
-            --title "$GITHUB_REF_NAME" \
+          V="${{ steps.version.outputs.version }}"
+          gh release create "$V" main.js manifest.json \
+            --target "$GITHUB_SHA" \
+            --title "$V" \
             --generate-notes
