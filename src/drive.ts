@@ -89,6 +89,12 @@ export class DriveClient {
 		}
 	}
 
+	/** E-mail address of the connected Google account (to confirm the right account). */
+	async accountEmail(): Promise<string> {
+		const res = await this.request({ url: `${API}/about?fields=user(emailAddress)` });
+		return res.json?.user?.emailAddress ?? "";
+	}
+
 	/** Finds or creates the sync folder in the root of "Meine Ablage". */
 	async ensureFolder(name: string): Promise<string> {
 		const query = `name='${q(name)}' and mimeType='${FOLDER_MIME}' and 'root' in parents and trashed=false`;

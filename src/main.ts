@@ -2,6 +2,7 @@ import {
 	App,
 	debounce,
 	FuzzySuggestModal,
+	Modal,
 	Notice,
 	Platform,
 	Plugin,
@@ -11,8 +12,9 @@ import {
 	TFile,
 } from "obsidian";
 import { hasConflictMarkers } from "./merge";
+import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
-import { DriveClient } from "./drive";
+import { Credentials, DriveClient } from "./drive";
 import { SyncEngine, SyncResult, SyncState } from "./sync";
 
 interface Settings {
@@ -93,6 +95,11 @@ export default class DriveSyncPlugin extends Plugin {
 			id: "show-conflicts",
 			name: "Notizen mit Sync-Konflikten anzeigen",
 			callback: () => this.showConflicts(),
+		});
+
+		// QR code / link from another device: obsidian://gdrive-vault-sync?code=ODS1:…
+		this.registerObsidianProtocolHandler(LINK_ACTION, (params) => {
+			if (params.code) void this.connectWithCode(params.code);
 		});
 
 		this.statusEl = this.addStatusBarItem();
@@ -207,6 +214,48 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 	}
 
+	connectionCode(): string {
+		return exportConnection({
+			clientId: this.settings.clientId,
+			clientSecret: this.settings.clientSecret,
+			refreshToken: this.settings.refreshToken,
+		});
+	}
+
+	/**
+	 * Takes over a connection code (pasted, or from a scanned QR code / tapped link).
+	 * Always shows which Google account it belongs to and asks for confirmation,
+	 * so a foreign link can never silently connect this vault to someone else's Drive.
+	 */
+	async connectWithCode(code: string, onDone?: () => void) {
+		let creds: Credentials;
+		try {
+			creds = importConnection(code);
+		} catch (e) {
+			new Notice((e as Error).message);
+			return;
+		}
+		if (creds.refreshToken === this.settings.refreshToken) {
+			new Notice("Dieses Gerät ist bereits mit diesem Code verbunden ✓");
+			return;
+		}
+		let email = "";
+		try {
+			email = await new DriveClient(() => creds).accountEmail();
+		} catch (e) {
+			new Notice(`Der Verbindungscode funktioniert nicht: ${(e as Error).message}`, 10000);
+			return;
+		}
+		new ConfirmConnectModal(this.app, email, async () => {
+			Object.assign(this.settings, creds);
+			await this.saveAll();
+			new Notice(`Mit Google Drive verbunden ✓ (${email})`);
+			this.renderStatus();
+			onDone?.();
+			void this.sync(true);
+		}).open();
+	}
+
 	async openNote(path: string) {
 		const f = this.app.vault.getAbstractFileByPath(path);
 		if (f instanceof TFile) await this.app.workspace.getLeaf(false).openFile(f);
@@ -270,6 +319,79 @@ export default class DriveSyncPlugin extends Plugin {
 
 	async saveAll() {
 		await this.saveData({ settings: this.settings, state: this.state } satisfies PluginData);
+	}
+}
+
+const LINK_ACTION = "gdrive-vault-sync";
+
+class QrModal extends Modal {
+	constructor(app: App, private code: string) {
+		super(app);
+	}
+	onOpen() {
+		const { contentEl } = this;
+		this.titleEl.setText("Weiteres Gerät verbinden");
+		const link = `obsidian://${LINK_ACTION}?code=${encodeURIComponent(this.code)}`;
+		const qr = qrcode(0, "L");
+		qr.addData(link);
+		qr.make();
+		const svg = new DOMParser().parseFromString(
+			qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true }),
+			"image/svg+xml"
+		).documentElement;
+		svg.setAttribute("width", "100%");
+		svg.removeAttribute("height");
+		const box = contentEl.createDiv();
+		box.setCssStyles({
+			background: "#ffffff",
+			padding: "12px",
+			borderRadius: "8px",
+			maxWidth: "340px",
+			margin: "0 auto 12px",
+		});
+		box.appendChild(contentEl.doc.importNode(svg, true));
+
+		const ol = contentEl.createEl("ol");
+		ol.createEl("li", { text: "Auf dem Tablet/Handy Obsidian mit dem richtigen Vault öffnen – das Plugin muss dort installiert und aktiviert sein." });
+		ol.createEl("li", { text: "Die Kamera-App öffnen und auf diesen QR-Code richten." });
+		ol.createEl("li", { text: "Auf den eingeblendeten Hinweis „In Obsidian öffnen“ tippen und bestätigen." });
+		contentEl.createEl("p", {
+			cls: "mod-warning",
+			text: "⚠ Der QR-Code enthält deinen Zugang. Keinen Screenshot teilen und das Fenster nach dem Scannen schließen.",
+		});
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class ConfirmConnectModal extends Modal {
+	constructor(app: App, private email: string, private onConfirm: () => void | Promise<void>) {
+		super(app);
+	}
+	onOpen() {
+		this.titleEl.setText("Mit Google Drive verbinden?");
+		this.contentEl.createEl("p", {
+			text: `Dieses Gerät wird mit dem Google-Konto ${this.email || "(unbekannt)"} verbunden. Deine Notizen werden in dessen Google Drive synchronisiert.`,
+		});
+		this.contentEl.createEl("p", {
+			cls: "setting-item-description",
+			text: "Nur bestätigen, wenn das dein eigenes Konto ist und du den Code selbst erzeugt hast.",
+		});
+		new Setting(this.contentEl)
+			.addButton((b) => b.setButtonText("Abbrechen").onClick(() => this.close()))
+			.addButton((b) =>
+				b
+					.setButtonText("Verbinden")
+					.setCta()
+					.onClick(async () => {
+						this.close();
+						await this.onConfirm();
+					})
+			);
+	}
+	onClose() {
+		this.contentEl.empty();
 	}
 }
 
@@ -364,19 +486,20 @@ class DriveSyncSettingTab extends PluginSettingTab {
 
 		if (p.isConnected()) {
 			new Setting(containerEl)
-				.setName("Verbindungscode für weitere Geräte")
+				.setName("Weiteres Gerät verbinden")
 				.setDesc(
-					"Kopieren und auf Handy/Tablet unten einfügen. Enthält deinen Zugang – nicht weitergeben!"
+					"QR-Code mit der Kamera von iPad/iPhone/Android scannen – oder den Code kopieren und dort einfügen. " +
+						"Enthält deinen Zugang – nicht weitergeben!"
+				)
+				.addButton((b) =>
+					b
+						.setButtonText("QR-Code anzeigen")
+						.setCta()
+						.onClick(() => new QrModal(this.app, p.connectionCode()).open())
 				)
 				.addButton((b) =>
 					b.setButtonText("Code kopieren").onClick(async () => {
-						await navigator.clipboard.writeText(
-							exportConnection({
-								clientId: s.clientId,
-								clientSecret: s.clientSecret,
-								refreshToken: s.refreshToken,
-							})
-						);
+						await navigator.clipboard.writeText(p.connectionCode());
 						new Notice("Verbindungscode kopiert.");
 					})
 				);
@@ -385,21 +508,12 @@ class DriveSyncSettingTab extends PluginSettingTab {
 		let code = "";
 		new Setting(containerEl)
 			.setName("Verbindungscode einfügen")
-			.setDesc("Für Geräte, auf denen die Browser-Anmeldung nicht geht (iPhone, Android).")
+			.setDesc(
+				"Für Handy/Tablet. Einfacher: am Computer „QR-Code anzeigen“ wählen und mit der Kamera scannen."
+			)
 			.addText((t) => t.setPlaceholder("ODS1:…").onChange((v) => (code = v)))
 			.addButton((b) =>
-				b.setButtonText("Übernehmen").onClick(async () => {
-					try {
-						const c = importConnection(code);
-						Object.assign(s, c);
-						await p.saveAll();
-						new Notice("Mit Google Drive verbunden ✓");
-						this.display();
-						p.sync(true);
-					} catch (e) {
-						new Notice((e as Error).message);
-					}
-				})
+				b.setButtonText("Übernehmen").onClick(() => p.connectWithCode(code, () => this.display()))
 			);
 
 		if (p.isConnected()) {

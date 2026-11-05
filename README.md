@@ -98,9 +98,14 @@ und `main.js` und `manifest.json` hineinkopieren. Danach Obsidian neu laden und 
 **Am Computer:** Einstellungen → *Google Drive Vault Sync* → Client-ID und Secret eintragen →
 **Verbinden**. Der Browser öffnet sich, du meldest dich bei Google an, fertig.
 
-**Auf Handy/Tablet:** Am Computer auf **„Code kopieren“** klicken, den Code z. B. per Notiz oder
-Messenger an dich selbst schicken und auf dem Handy unter **„Verbindungscode einfügen“**
-übernehmen. Danach den Code beim Messenger wieder löschen, er enthält deinen Zugang.
+**Auf Handy/Tablet, per QR-Code (empfohlen):** Auf dem Tablet/Handy Obsidian mit dem Vault öffnen
+(Plugin installiert und aktiviert). Am Computer auf **„QR-Code anzeigen“** klicken. Mit der
+**Kamera-App** des Tablets/Handys scannen und auf **„In Obsidian öffnen“** tippen. Obsidian zeigt, mit
+welchem Google-Konto verbunden wird, und fragt nach Bestätigung. Zwischenablage oder Tippen sind nicht nötig.
+
+**Alternativ per Code:** Am Computer auf **„Code kopieren“** klicken und auf dem Gerät unter
+**„Verbindungscode einfügen“** übernehmen. Wenn das Einfügen am iPad/iPhone blockiert ist:
+iOS-Einstellungen → Obsidian → „Aus anderen Apps einfügen“ → „Erlauben“.
 
 ### 4. Erste Synchronisierung, so geht nichts schief
 
