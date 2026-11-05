@@ -137,13 +137,7 @@ export class DriveClient {
 		id?: string,
 		mtime?: number
 	): Promise<RemoteEntry> {
-		const metadata: Record<string, unknown> = {
-			name: path,
-			appProperties: { vpath: path, device },
-		};
-		// Store the real edit time (not the upload time) so "newer wins" is fair.
-		if (mtime) metadata.modifiedTime = new Date(mtime).toISOString();
-		if (!id) metadata.parents = [folderId];
+		const metadata = buildMetadata(folderId, path, device, id, mtime);
 		const fields = `fields=${encodeURIComponent(FILE_FIELDS)}`;
 		const method = id ? "PATCH" : "POST";
 		const base = id ? `${UPLOAD}/files/${id}` : `${UPLOAD}/files`;
@@ -184,6 +178,43 @@ export class DriveClient {
 	}
 }
 
+/** Google Drive limit: key + value of each appProperty must be <= 124 bytes (UTF-8). */
+export const APP_PROPERTY_LIMIT = 124;
+
+/** Cuts a string to at most maxBytes UTF-8 bytes without breaking a character. */
+export function truncateUtf8(value: string, maxBytes: number): string {
+	const enc = new TextEncoder();
+	if (enc.encode(value).byteLength <= maxBytes) return value;
+	let out = "";
+	let used = 0;
+	for (const ch of value) {
+		const n = enc.encode(ch).byteLength;
+		if (used + n > maxBytes) break;
+		out += ch;
+		used += n;
+	}
+	return out;
+}
+
+export function buildMetadata(
+	folderId: string,
+	path: string,
+	device: string,
+	id?: string,
+	mtime?: number
+): Record<string, unknown> {
+	const appProperties: Record<string, string | null> = {
+		device: truncateUtf8(device, APP_PROPERTY_LIMIT - "device".length),
+	};
+	// Remove the old, size-limited path property from files of earlier versions.
+	if (id) appProperties.vpath = null;
+	const metadata: Record<string, unknown> = { name: path, appProperties };
+	if (!id) metadata.parents = [folderId];
+	// Store the real edit time (not the upload time) so "newer wins" is fair.
+	if (mtime) metadata.modifiedTime = new Date(mtime).toISOString();
+	return metadata;
+}
+
 function toEntry(f: {
 	id: string;
 	name: string;
@@ -193,7 +224,9 @@ function toEntry(f: {
 }): RemoteEntry {
 	return {
 		id: f.id,
-		path: f.appProperties?.vpath ?? f.name,
+		// The file name is the vault path. (Older versions also stored it in
+		// appProperties.vpath, which is limited to 124 bytes – no longer used.)
+		path: f.name,
 		md5: f.md5Checksum ?? "",
 		modifiedTime: f.modifiedTime ? Date.parse(f.modifiedTime) : 0,
 		device: f.appProperties?.device,
