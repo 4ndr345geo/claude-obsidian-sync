@@ -1,6 +1,7 @@
 import SparkMD5 from "spark-md5";
 import { TFile, TFolder } from "obsidian";
 import type { RemoteEntry } from "../src/plan";
+import { SyncEngine, SyncState } from "../src/sync";
 
 let clock = 1_000_000;
 export const tick = () => (clock += 1000);
@@ -30,7 +31,8 @@ export class FakeVault {
   configDir = ".obsidian";
   data = new Map<string, ArrayBuffer>();
   nodes = new Map<string, TFile>();
-  hidden = new Map<string, string>();
+  /** Files outside Obsidian's index (settings folder, base copies). */
+  hidden = new Map<string, { data: ArrayBuffer | string; mtime: number }>();
   getFiles() { return [...this.nodes.values()]; }
   getAbstractFileByPath(p: string) {
     if (this.nodes.has(p)) return this.nodes.get(p)!;
@@ -51,11 +53,53 @@ export class FakeVault {
   }
   remove(p: string) { this.nodes.delete(p); this.data.delete(p); }
   text(p: string) { const d = this.data.get(p); return d ? dec.decode(d) : undefined; }
+  private hiddenExists(p: string) {
+    return this.hidden.has(p) || [...this.hidden.keys()].some((k) => k.startsWith(p + "/"));
+  }
+  setHidden(p: string, d: ArrayBuffer | string) { this.hidden.set(p, { data: d, mtime: tick() }); }
+  hiddenText(p: string) {
+    const e = this.hidden.get(p);
+    if (!e) return undefined;
+    return typeof e.data === "string" ? e.data : dec.decode(e.data);
+  }
   adapter = {
-    exists: async (p: string) => this.hidden.has(p) || [...this.hidden.keys()].some((k) => k.startsWith(p + "/")),
+    exists: async (p: string) => this.hiddenExists(p),
     mkdir: async () => {},
-    write: async (p: string, t: string) => void this.hidden.set(p, t),
-    read: async (p: string) => this.hidden.get(p)!,
+    rmdir: async () => {},
+    write: async (p: string, t: string) => this.setHidden(p, t),
+    writeBinary: async (p: string, d: ArrayBuffer) => this.setHidden(p, copy(d)),
+    read: async (p: string) => this.hiddenText(p)!,
+    readBinary: async (p: string) => {
+      const e = this.hidden.get(p)!;
+      return typeof e.data === "string" ? buf(e.data) : copy(e.data);
+    },
     remove: async (p: string) => void this.hidden.delete(p),
+    stat: async (p: string) => {
+      const e = this.hidden.get(p);
+      if (!e) return null;
+      const size = typeof e.data === "string" ? enc.encode(e.data).byteLength : e.data.byteLength;
+      return { type: "file", mtime: e.mtime, size, ctime: 0 };
+    },
+    list: async (dir: string) => {
+      const files = new Set<string>(), folders = new Set<string>();
+      for (const k of this.hidden.keys()) {
+        if (!k.startsWith(dir + "/")) continue;
+        const rest = k.slice(dir.length + 1);
+        if (rest.includes("/")) folders.add(dir + "/" + rest.split("/")[0]);
+        else files.add(k);
+      }
+      return { files: [...files], folders: [...folders] };
+    },
   };
+}
+
+export function device(drive: FakeDrive, name: string, configEnabled = false) {
+  const vault = new FakeVault();
+  const state: SyncState = { base: {}, cache: {}, folderId: "", folderName: "" };
+  const app = { vault, fileManager: { trashFile: async (f: { path: string }) => vault.remove(f.path) } };
+  const config = { enabled: configEnabled, settings: true, appearance: true, plugins: true };
+  const engine = new SyncEngine(app as never, drive as never, state,
+    () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config }),
+    ".obsidian/plugins/gdrive-vault-sync/base", async () => {});
+  return { vault, sync: () => engine.run(), name, config };
 }

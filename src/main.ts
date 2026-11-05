@@ -14,6 +14,7 @@ import {
 import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
+import { ConfigSyncOptions } from "./config";
 import { Credentials, DriveClient } from "./drive";
 import { SyncEngine, SyncResult, SyncState } from "./sync";
 
@@ -29,6 +30,7 @@ interface Settings {
 	syncOnResume: boolean;
 	excludes: string;
 	showNotices: boolean;
+	config: ConfigSyncOptions;
 }
 
 interface PluginData {
@@ -79,9 +81,11 @@ export default class DriveSyncPlugin extends Plugin {
 				folderName: this.settings.folderName,
 				deviceName: this.settings.deviceName,
 				excludes: this.settings.excludes.split("\n"),
+				config: this.settings.config,
 			}),
 			`${this.app.vault.configDir}/plugins/${this.manifest.id}/base`,
-			() => this.saveAll()
+			() => this.saveAll(),
+			this.manifest.id
 		);
 
 		this.addRibbonIcon("refresh-cw", "Mit Google Drive synchronisieren", () => this.sync(true));
@@ -209,6 +213,17 @@ export default class DriveSyncPlugin extends Plugin {
 			console.error("[Google Drive Sync]", r.errors);
 			new Notice(`Google Drive Sync: ${r.errors.length} Fehler – ${r.errors[0]}`, 10000);
 		}
+		if (r.configChanged) {
+			const n = new Notice(
+				"Google Drive Sync: Einstellungen von einem anderen Gerät wurden übernommen. " +
+					"Damit sie wirksam werden, Obsidian neu laden – hier tippen.",
+				0
+			);
+			n.noticeEl.addEventListener("click", () => {
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				(this.app as any).commands?.executeCommandById("app:reload");
+			});
+		}
 		if (manual || (this.settings.showNotices && parts.length)) {
 			new Notice(`Google Drive Sync: ${parts.length ? parts.join(" · ") : "Alles aktuell ✓"}`);
 		}
@@ -313,6 +328,10 @@ export default class DriveSyncPlugin extends Plugin {
 				showNotices: false,
 			},
 			data.settings
+		);
+		this.settings.config = Object.assign(
+			{ enabled: false, settings: true, appearance: true, plugins: true },
+			data.settings?.config
 		);
 		this.state = Object.assign({ base: {}, cache: {}, folderId: "", folderName: "" }, data.state);
 	}
@@ -582,9 +601,40 @@ class DriveSyncSettingTab extends PluginSettingTab {
 		toggle("Beim Zurückkehren in die App synchronisieren", "Wichtig für Handy und Tablet.", "syncOnResume");
 		toggle("Meldung bei jeder Synchronisierung", "Zeigt eine Meldung, wenn Dateien übertragen wurden.", "showNotices");
 
+		containerEl.createEl("h3", { text: "Einstellungen (.obsidian) synchronisieren" });
+		const cfg = s.config;
+		const cfgToggle = (name: string, desc: string, key: keyof ConfigSyncOptions, refresh = false) =>
+			new Setting(containerEl)
+				.setName(name)
+				.setDesc(desc)
+				.addToggle((t) =>
+					t.setValue(cfg[key]).onChange(async (v) => {
+						cfg[key] = v;
+						await p.saveAll();
+						if (refresh) this.display();
+					})
+				);
+		cfgToggle(
+			"Einstellungen synchronisieren",
+			"Überträgt Obsidian-Einstellungen, Themes und Plugins auf alle Geräte. Auf jedem Gerät einschalten, " +
+				"zuerst auf dem Gerät mit den besten Einstellungen. Fensterlayout und der Zugang dieses Plugins bleiben " +
+				"immer gerätespezifisch.",
+			"enabled",
+			true
+		);
+		if (cfg.enabled) {
+			cfgToggle("Allgemeine Einstellungen", "Editor, Dateien & Links, Tastenkürzel, Kern-Plugins, Lesezeichen …", "settings");
+			cfgToggle("Darstellung", "Themes und CSS-Snippets", "appearance");
+			cfgToggle("Community-Plugins", "Installierte Plugins, ob sie aktiv sind, und ihre Einstellungen", "plugins");
+		}
+
+		containerEl.createEl("h3", { text: "Erweitert" });
 		new Setting(containerEl)
 			.setName("Ausschließen")
-			.setDesc("Ein Muster pro Zeile, z. B. „Privat/**“ oder „*.mp4“. Der Ordner .obsidian wird nie synchronisiert.")
+			.setDesc(
+				"Ein Muster pro Zeile, z. B. „Privat/**“, „*.mp4“ oder für ein einzelnes Plugin " +
+					"„.obsidian/plugins/obsidian-git/**“."
+			)
 			.addTextArea((t) => {
 				t.inputEl.rows = 5;
 				t.setValue(s.excludes).onChange(async (v) => {

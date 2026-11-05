@@ -1,7 +1,8 @@
 import { App, normalizePath, TFile, TFolder } from "obsidian";
 import SparkMD5 from "spark-md5";
 import { DriveClient } from "./drive";
-import { conflictPath, isMergeable, mergeText } from "./merge";
+import { ConfigSyncOptions, makeConfigFilter } from "./config";
+import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
 import { Action, BaseEntry, LocalEntry, planSync, RemoteEntry } from "./plan";
 
 export interface SyncState {
@@ -16,6 +17,7 @@ export interface SyncSettingsView {
 	folderName: string;
 	deviceName: string;
 	excludes: string[];
+	config: ConfigSyncOptions;
 }
 
 export interface SyncResult {
@@ -28,6 +30,8 @@ export interface SyncResult {
 	/** Conflict copies created (binary files). */
 	conflicts: string[];
 	errors: string[];
+	/** Settings from another device were applied -> Obsidian should be reloaded. */
+	configChanged: boolean;
 }
 
 export function md5(data: ArrayBuffer): string {
@@ -63,8 +67,18 @@ export class SyncEngine {
 		private state: SyncState,
 		private settings: () => SyncSettingsView,
 		private baseDir: string,
-		private persist: () => Promise<void>
+		private persist: () => Promise<void>,
+		private ownPluginId = "gdrive-vault-sync"
 	) {}
+
+	private get configPrefix() {
+		return this.vault.configDir + "/";
+	}
+
+	/** File inside the settings folder (.obsidian)? Those are handled via the adapter. */
+	private isConfig(path: string) {
+		return path.startsWith(this.configPrefix);
+	}
 
 	private get vault() {
 		return this.app.vault;
@@ -72,7 +86,7 @@ export class SyncEngine {
 
 	async run(onProgress?: (msg: string) => void): Promise<SyncResult> {
 		const s = this.settings();
-		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [] };
+		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false };
 
 		if (!this.state.folderId || this.state.folderName !== s.folderName) {
 			this.state.folderId = await this.drive.ensureFolder(s.folderName);
@@ -85,12 +99,16 @@ export class SyncEngine {
 
 		onProgress?.("Lese Google Drive …");
 		const remoteList = await this.drive.listFiles(this.state.folderId);
-		const excluded = makeExcluder(s.excludes);
+		const userExcluded = makeExcluder(s.excludes);
+		const configWanted = makeConfigFilter(this.vault.configDir, this.ownPluginId, s.config);
+		const excluded = (p: string) =>
+			userExcluded(p) || (this.isConfig(p) && !configWanted(p));
 		const remoteFiltered = remoteList.filter((r) => !excluded(r.path));
 		const remoteById = new Map(remoteFiltered.map((r) => [r.id, r]));
 
 		onProgress?.("Prüfe lokale Dateien …");
 		const local = await this.scanLocal(excluded);
+		if (s.config.enabled) await this.scanConfig(this.vault.configDir, excluded, local);
 
 		const plan = planSync(local, remoteFiltered, this.state.base);
 		const work = plan.actions.filter((a) => a.type !== "setBase" && a.type !== "dropBase");
@@ -117,9 +135,9 @@ export class SyncEngine {
 			if (done % 25 === 0) await this.persist();
 		}
 
-		// Forget cache entries for files that no longer exist.
+		// Forget cache entries for files that are gone or no longer synchronised.
 		for (const p of Object.keys(this.state.cache)) {
-			if (!this.vault.getAbstractFileByPath(p)) delete this.state.cache[p];
+			if (!local.has(p) && !(await this.statLocal(p))) delete this.state.cache[p];
 		}
 		await this.persist();
 		return result;
@@ -141,13 +159,62 @@ export class SyncEngine {
 		return out;
 	}
 
-	/** True if the local file still matches what we saw during the scan. */
-	private unchangedSinceScan(path: string, local: Map<string, LocalEntry>): boolean {
+	/** Recursively scans the settings folder (not part of Obsidian's file index). */
+	private async scanConfig(dir: string, excluded: (p: string) => boolean, out: Map<string, LocalEntry>) {
+		let listing: { files: string[]; folders: string[] };
+		try {
+			listing = await this.vault.adapter.list(dir);
+		} catch {
+			return;
+		}
+		for (const path of listing.files) {
+			if (excluded(path)) continue;
+			const st = await this.vault.adapter.stat(path);
+			if (!st || st.type !== "file") continue;
+			let cached = this.state.cache[path];
+			if (!cached || cached.mtime !== st.mtime || cached.size !== st.size) {
+				const data = await this.vault.adapter.readBinary(path);
+				cached = { mtime: st.mtime, size: st.size, hash: md5(data) };
+				this.state.cache[path] = cached;
+			}
+			out.set(path, { path, hash: cached.hash, mtime: st.mtime });
+		}
+		for (const folder of listing.folders) {
+			// Skip folders that can never contain synchronised files.
+			if (folder === normalizePath(this.baseDir).replace(/\/base$/, "")) continue;
+			await this.scanConfig(folder, excluded, out);
+		}
+	}
+
+	private async statLocal(path: string): Promise<{ mtime: number; size: number } | null> {
+		if (this.isConfig(path)) {
+			const st = await this.vault.adapter.stat(path);
+			return st && st.type === "file" ? { mtime: st.mtime, size: st.size } : null;
+		}
 		const f = this.vault.getAbstractFileByPath(path);
+		return f instanceof TFile ? { mtime: f.stat.mtime, size: f.stat.size } : null;
+	}
+
+	private async readLocal(path: string): Promise<ArrayBuffer | null> {
+		if (this.isConfig(path)) {
+			return (await this.vault.adapter.exists(path)) ? this.vault.adapter.readBinary(path) : null;
+		}
+		const f = this.vault.getAbstractFileByPath(path);
+		return f instanceof TFile ? this.vault.readBinary(f) : null;
+	}
+
+	/** True if the local file still matches what we saw during the scan. */
+	private async unchangedSinceScan(path: string, local: Map<string, LocalEntry>): Promise<boolean> {
+		const st = await this.statLocal(path);
 		const seen = local.get(path);
-		if (!f) return !seen;
-		if (!(f instanceof TFile) || !seen) return false;
-		return f.stat.mtime === seen.mtime;
+		if (!st) return !seen;
+		if (!seen) return false;
+		return st.mtime === seen.mtime;
+	}
+
+	/** Base copies are kept for notes (line merge) and settings files (JSON merge). */
+	private keepsBaseText(path: string) {
+		return isMergeable(path) || (this.isConfig(path) && path.endsWith(".json"));
 	}
 
 	private async execute(
@@ -157,13 +224,14 @@ export class SyncEngine {
 		r: SyncResult
 	): Promise<void> {
 		switch (a.type) {
-			case "setBase":
+			case "setBase": {
 				this.state.base[a.path] = { hash: a.hash, remoteId: a.remoteId };
-				if (isMergeable(a.path)) {
-					const f = this.vault.getAbstractFileByPath(a.path);
-					if (f instanceof TFile) await this.writeBaseText(a.path, await this.vault.read(f));
+				if (this.keepsBaseText(a.path)) {
+					const data = await this.readLocal(a.path);
+					if (data) await this.writeBaseText(a.path, new TextDecoder().decode(data));
 				}
 				return;
+			}
 			case "dropBase":
 				await this.forget(a.path);
 				return;
@@ -172,19 +240,26 @@ export class SyncEngine {
 				r.uploaded++;
 				return;
 			case "download": {
-				if (!this.unchangedSinceScan(a.path, local)) return; // edited right now -> next round
+				if (!(await this.unchangedSinceScan(a.path, local))) return; // edited right now -> next round
 				const data = await this.drive.download(a.remoteId);
 				await this.writeLocal(a.path, data);
 				await this.setBaseFromData(a.path, data, a.remoteId);
 				r.downloaded++;
+				if (this.isConfig(a.path)) r.configChanged = true;
 				return;
 			}
 			case "deleteLocal": {
-				if (!this.unchangedSinceScan(a.path, local)) return;
-				const f = this.vault.getAbstractFileByPath(a.path);
-				if (f) await this.app.fileManager.trashFile(f);
+				if (!(await this.unchangedSinceScan(a.path, local))) return;
+				if (this.isConfig(a.path)) {
+					if (await this.vault.adapter.exists(a.path)) await this.vault.adapter.remove(a.path);
+					await this.removeEmptyConfigParents(a.path);
+					r.configChanged = true;
+				} else {
+					const f = this.vault.getAbstractFileByPath(a.path);
+					if (f) await this.app.fileManager.trashFile(f);
+					await this.removeEmptyParents(a.path);
+				}
 				await this.forget(a.path);
-				await this.removeEmptyParents(a.path);
 				r.deleted++;
 				return;
 			}
@@ -194,7 +269,11 @@ export class SyncEngine {
 				r.deleted++;
 				return;
 			case "conflict":
-				if (!this.unchangedSinceScan(a.path, local)) return;
+				if (!(await this.unchangedSinceScan(a.path, local))) return;
+				if (this.isConfig(a.path)) {
+					await this.resolveConfigConflict(a.path, a.remoteId, a.hasBase, remoteById.get(a.remoteId), r);
+					return;
+				}
 				await this.resolveConflict(a.path, a.remoteId, a.hasBase, remoteById.get(a.remoteId), r);
 				return;
 		}
@@ -254,10 +333,47 @@ export class SyncEngine {
 		}
 	}
 
+	/**
+	 * Settings files: JSON files are merged per setting (conflicting settings:
+	 * newer wins); other files (CSS, plugin code) are replaced by the newer
+	 * version. No conflict copies, no markers – that would break the settings.
+	 */
+	private async resolveConfigConflict(
+		path: string,
+		remoteId: string,
+		hasBase: boolean,
+		remote: RemoteEntry | undefined,
+		r: SyncResult
+	): Promise<void> {
+		const st = await this.statLocal(path);
+		const localData = await this.readLocal(path);
+		if (!st || !localData) return;
+		const remoteData = await this.drive.download(remoteId);
+		const localNewer = st.mtime >= (remote?.modifiedTime ?? 0);
+
+		let result: ArrayBuffer = localNewer ? localData : remoteData;
+		if (path.endsWith(".json")) {
+			const dec = new TextDecoder();
+			const merged = mergeJson(
+				dec.decode(localData),
+				hasBase ? await this.readBaseText(path) : null,
+				dec.decode(remoteData),
+				localNewer
+			);
+			if (merged !== null) result = new TextEncoder().encode(merged).buffer as ArrayBuffer;
+		}
+		if (md5(result) !== md5(localData)) {
+			await this.writeLocal(path, result);
+			r.configChanged = true;
+		}
+		await this.uploadData(path, result, remoteId);
+		r.merged++;
+	}
+
 	/** Two remote files for the same path (created at the same time on two devices). */
 	private async resolveDuplicate(dup: RemoteEntry, all: RemoteEntry[], r: SyncResult): Promise<void> {
 		const primary = all.find((x) => x.path === dup.path && x.id !== dup.id && x.md5 !== undefined);
-		if (primary && primary.md5 === dup.md5) {
+		if ((primary && primary.md5 === dup.md5) || this.isConfig(dup.path)) {
 			await this.drive.trash(dup.id);
 			return;
 		}
@@ -270,20 +386,20 @@ export class SyncEngine {
 	}
 
 	private async uploadPath(path: string, remoteId?: string): Promise<void> {
-		const f = this.vault.getAbstractFileByPath(path);
-		if (!(f instanceof TFile)) return;
-		await this.uploadData(path, await this.vault.readBinary(f), remoteId);
+		const data = await this.readLocal(path);
+		if (!data) return;
+		await this.uploadData(path, data, remoteId);
 	}
 
 	private async uploadData(path: string, data: ArrayBuffer, remoteId?: string): Promise<void> {
-		const f = this.vault.getAbstractFileByPath(path);
+		const st = await this.statLocal(path);
 		const entry = await this.drive.upload(
 			this.state.folderId,
 			path,
 			data,
 			this.settings().deviceName,
 			remoteId,
-			f instanceof TFile ? f.stat.mtime : Date.now()
+			st ? st.mtime : Date.now()
 		);
 		await this.setBaseFromData(path, data, entry.id);
 	}
@@ -291,11 +407,11 @@ export class SyncEngine {
 	private async setBaseFromData(path: string, data: ArrayBuffer, remoteId: string) {
 		const hash = md5(data);
 		this.state.base[path] = { hash, remoteId };
-		const f = this.vault.getAbstractFileByPath(path);
-		if (f instanceof TFile) {
-			this.state.cache[path] = { mtime: f.stat.mtime, size: f.stat.size, hash };
+		const st = await this.statLocal(path);
+		if (st) {
+			this.state.cache[path] = { mtime: st.mtime, size: st.size, hash };
 		}
-		if (isMergeable(path)) {
+		if (this.keepsBaseText(path)) {
 			await this.writeBaseText(path, new TextDecoder().decode(data));
 		}
 	}
@@ -308,6 +424,16 @@ export class SyncEngine {
 	}
 
 	private async writeLocal(path: string, data: ArrayBuffer): Promise<void> {
+		if (this.isConfig(path)) {
+			const adapter = this.vault.adapter;
+			const parts = path.split("/").slice(0, -1);
+			for (let i = 1; i <= parts.length; i++) {
+				const dir = parts.slice(0, i).join("/");
+				if (!(await adapter.exists(dir))) await adapter.mkdir(dir);
+			}
+			await adapter.writeBinary(path, data);
+			return;
+		}
 		const existing = this.vault.getAbstractFileByPath(path);
 		if (existing instanceof TFile) {
 			await this.vault.modifyBinary(existing, data);
@@ -327,6 +453,22 @@ export class SyncEngine {
 			if (!(f instanceof TFolder) || f.children.length > 0) return;
 			await this.vault.delete(f).catch(() => undefined);
 			dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+		}
+	}
+
+	/** Removes folders like .obsidian/plugins/xyz that became empty (never .obsidian itself). */
+	private async removeEmptyConfigParents(path: string) {
+		const adapter = this.vault.adapter;
+		let dir = path.slice(0, path.lastIndexOf("/"));
+		while (dir.length > this.vault.configDir.length && dir.startsWith(this.configPrefix)) {
+			try {
+				const l = await adapter.list(dir);
+				if (l.files.length || l.folders.length) return;
+				await adapter.rmdir(dir, false);
+			} catch {
+				return;
+			}
+			dir = dir.slice(0, dir.lastIndexOf("/"));
 		}
 	}
 

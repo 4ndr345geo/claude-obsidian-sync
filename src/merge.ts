@@ -209,3 +209,62 @@ export function conflictPath(path: string, device: string, date = new Date()): s
 	const safeDevice = device.replace(/[\\/:*?"<>|]/g, "").trim() || "anderes Gerät";
 	return `${dir}${name} (Konflikt ${safeDevice} ${stamp})${ext}`;
 }
+
+// ---------------------------------------------------------------------------
+// Settings files (.obsidian/*.json): three-way merge per setting (key).
+// ---------------------------------------------------------------------------
+
+type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+
+function isPlainObject(v: unknown): v is Record<string, Json> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Merges one value. `undefined` means "not present" (deleted / never existed).
+ * Objects are merged key by key; everything else (numbers, strings, arrays) is
+ * treated as a single setting: if both devices changed it differently, the
+ * more recently edited device wins.
+ */
+function merge3(local: Json | undefined, base: Json | undefined, remote: Json | undefined, localNewer: boolean): Json | undefined {
+	if (deepEqual(local, remote)) return local;
+	if (deepEqual(local, base)) return remote;
+	if (deepEqual(remote, base)) return local;
+	if (isPlainObject(local) && isPlainObject(remote)) {
+		const b = isPlainObject(base) ? base : undefined;
+		const out: Record<string, Json> = {};
+		const keys = [...Object.keys(local), ...Object.keys(remote).filter((k) => !(k in local))];
+		for (const k of keys) {
+			const v = merge3(local[k], b?.[k], remote[k], localNewer);
+			if (v !== undefined) out[k] = v;
+		}
+		return out;
+	}
+	return localNewer ? local : remote;
+}
+
+/**
+ * Three-way merge for JSON settings files. Never produces markers (that would
+ * break the file): conflicting settings are decided by "newer wins".
+ * Returns null if a file is not valid JSON (caller falls back to "newer wins").
+ */
+export function mergeJson(local: string, base: string | null, remote: string, localNewer: boolean): string | null {
+	let l: Json, r: Json, b: Json | undefined;
+	try {
+		l = JSON.parse(local);
+		r = JSON.parse(remote);
+	} catch {
+		return null;
+	}
+	try {
+		b = base !== null ? JSON.parse(base) : undefined;
+	} catch {
+		b = undefined;
+	}
+	const merged = merge3(l, b, r, localNewer);
+	return JSON.stringify(merged ?? {}, null, 2);
+}

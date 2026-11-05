@@ -121,11 +121,34 @@ iOS-Einstellungen → Obsidian → „Aus anderen Apps einfügen“ → „Erlau
 
 - In Google Drive liegen alle Dateien in einem Ordner (Standard: `Obsidian – <Vault-Name>`).
   Der Dateiname entspricht dem Pfad im Vault, z. B. `Projekte/Idee.md`.
-- Der Ordner `.obsidian` (Einstellungen, Themes, Plugins) wird **nicht** synchronisiert. So kann
-  jedes Gerät eigene Einstellungen haben, und es gibt keine Konflikte mit `workspace.json`.
+- **Einstellungen (`.obsidian`)** lassen sich optional mitsynchronisieren, siehe unten.
 - Umbenennen wird als „alte Datei löschen + neue anlegen“ übertragen.
 - Die Statusleiste unten zeigt den Zustand (`☁ ✓ vor 2 Min.`). Ein Klick darauf synchronisiert sofort.
 - Befehl: *„Jetzt mit Google Drive synchronisieren“* (auch per Tastenkürzel belegbar).
+
+## Einstellungen, Themes und Plugins synchronisieren
+
+In den Plugin-Einstellungen unter **„Einstellungen (.obsidian) synchronisieren“** einschalten, auf
+**jedem** Gerät. Am besten zuerst auf dem Gerät, dessen Einstellungen du behalten willst.
+Synchronisieren und danach die anderen Geräte einschalten.
+
+| Bereich | Inhalt |
+|---|---|
+| Allgemeine Einstellungen | Editor, Dateien & Links, Tastenkürzel, Kern-Plugins, Lesezeichen … |
+| Darstellung | Themes und CSS-Snippets |
+| Community-Plugins | installierte Plugins, ob sie aktiv sind, und ihre Einstellungen |
+
+- **Nie synchronisiert:** das Fensterlayout (`workspace.json`, `workspace-mobile.json`) und der
+  Ordner dieses Plugins (enthält deinen Google-Zugang und den Sync-Status des Geräts).
+- **Gleichzeitige Änderungen:** Einstellungsdateien werden **pro Einstellung** zusammengeführt.
+  Ändert der Laptop das Theme und das iPad die Schriftgröße, bleibt beides. Wurde *dieselbe*
+  Einstellung auf zwei Geräten geändert, gewinnt die neuere. Konfliktkopien oder Markierungen gibt
+  es in `.obsidian` nicht, damit die Einstellungen gültig bleiben.
+- **Neu laden:** Übernommene Einstellungen wirken erst nach einem Neustart von Obsidian. Das Plugin
+  zeigt dann eine Meldung, ein Tipp darauf lädt Obsidian neu.
+- **Einzelne Plugins ausnehmen**, z. B. wenn ein Plugin gerätespezifische Einstellungen hat: unter
+  „Ausschließen“ eine Zeile wie `.obsidian/plugins/obsidian-git/**` eintragen.
+- **Abschalten** löscht nichts, weder lokal noch in Google Drive.
 
 ## Entwicklung
 

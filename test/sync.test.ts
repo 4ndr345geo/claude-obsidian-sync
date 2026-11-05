@@ -1,16 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SyncEngine, SyncState } from "../src/sync";
-import { FakeDrive, FakeVault, buf } from "./fakes";
+import { FakeDrive, buf, device } from "./fakes";
 
-function device(drive: FakeDrive, name: string) {
-  const vault = new FakeVault();
-  const state: SyncState = { base: {}, cache: {}, folderId: "", folderName: "" };
-  const app = { vault, fileManager: { trashFile: async (f: { path: string }) => vault.remove(f.path) } };
-  const engine = new SyncEngine(app as never, drive as never, state,
-    () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"] }), ".obsidian/plugins/x/base", async () => {});
-  return { vault, sync: () => engine.run(), name };
-}
 
 function setup() {
   const drive = new FakeDrive();
