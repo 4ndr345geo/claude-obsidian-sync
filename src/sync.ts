@@ -20,6 +20,22 @@ export interface SyncSettingsView {
 	config: ConfigSyncOptions;
 }
 
+export type SyncEventKind =
+	| "up"
+	| "down"
+	| "delLocal"
+	| "delRemote"
+	| "merged"
+	| "marked"
+	| "copy"
+	| "error";
+
+export interface SyncEvent {
+	kind: SyncEventKind;
+	path: string;
+	detail?: string;
+}
+
 export interface SyncResult {
 	uploaded: number;
 	downloaded: number;
@@ -32,6 +48,8 @@ export interface SyncResult {
 	errors: string[];
 	/** Settings from another device were applied -> Obsidian should be reloaded. */
 	configChanged: boolean;
+	/** What happened, file by file (for the sync log). */
+	events: SyncEvent[];
 }
 
 export function md5(data: ArrayBuffer): string {
@@ -60,6 +78,29 @@ export function makeExcluder(patterns: string[]): (path: string) => boolean {
 	return (path) => rules.some((r) => r(path));
 }
 
+function snapshot(r: SyncResult) {
+	return {
+		up: r.uploaded,
+		down: r.downloaded,
+		del: r.deleted,
+		merged: r.merged,
+		marked: r.marked.length,
+		copies: r.conflicts.length,
+	};
+}
+
+/** Derives per-file events from the counters an action changed. */
+function recordEvents(r: SyncResult, b: ReturnType<typeof snapshot>, path: string, localDelete: boolean) {
+	if (r.deleted > b.del) r.events.push({ kind: localDelete ? "delLocal" : "delRemote", path });
+	if (r.marked.length > b.marked) r.events.push({ kind: "marked", path });
+	else if (r.merged > b.merged) r.events.push({ kind: "merged", path });
+	for (const copy of r.conflicts.slice(b.copies)) r.events.push({ kind: "copy", path: copy, detail: path });
+	if (r.conflicts.length === b.copies && r.marked.length === b.marked && r.merged === b.merged) {
+		if (r.uploaded > b.up) r.events.push({ kind: "up", path });
+		if (r.downloaded > b.down) r.events.push({ kind: "down", path });
+	}
+}
+
 export class SyncEngine {
 	constructor(
 		private app: App,
@@ -86,7 +127,7 @@ export class SyncEngine {
 
 	async run(onProgress?: (msg: string) => void): Promise<SyncResult> {
 		const s = this.settings();
-		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false };
+		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [] };
 
 		if (!this.state.folderId || this.state.folderName !== s.folderName) {
 			this.state.folderId = await this.drive.ensureFolder(s.folderName);
@@ -115,11 +156,14 @@ export class SyncEngine {
 		let done = 0;
 
 		for (const dup of plan.duplicates) {
+			const before = snapshot(result);
 			try {
 				await this.resolveDuplicate(dup, remoteFiltered, result);
 			} catch (e) {
 				result.errors.push(`${dup.path}: ${(e as Error).message}`);
+				result.events.push({ kind: "error", path: dup.path, detail: (e as Error).message });
 			}
+			recordEvents(result, before, dup.path, false);
 		}
 
 		for (const action of plan.actions) {
@@ -128,9 +172,15 @@ export class SyncEngine {
 					done++;
 					onProgress?.(`Synchronisiere ${done}/${work.length} …`);
 				}
-				await this.execute(action, local, remoteById, result);
+				const before = snapshot(result);
+				try {
+					await this.execute(action, local, remoteById, result);
+				} finally {
+					recordEvents(result, before, action.path, action.type === "deleteLocal");
+				}
 			} catch (e) {
 				result.errors.push(`${action.path}: ${(e as Error).message}`);
+				result.events.push({ kind: "error", path: action.path, detail: (e as Error).message });
 			}
 			if (done % 25 === 0) await this.persist();
 		}

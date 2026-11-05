@@ -15,6 +15,7 @@ import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { ConfigSyncOptions } from "./config";
+import { addEntry, formatEntry, logPath, makeLogMatcher } from "./log";
 import { Credentials, DriveClient } from "./drive";
 import { SyncEngine, SyncResult, SyncState } from "./sync";
 
@@ -31,6 +32,8 @@ interface Settings {
 	excludes: string;
 	showNotices: boolean;
 	config: ConfigSyncOptions;
+	logEnabled: boolean;
+	logFolder: string;
 }
 
 interface PluginData {
@@ -96,6 +99,11 @@ export default class DriveSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "open-log",
+			name: "Sync-Protokoll dieses Geräts öffnen",
+			callback: () => this.openLog(),
+		});
+		this.addCommand({
 			id: "show-conflicts",
 			name: "Notizen mit Sync-Konflikten anzeigen",
 			callback: () => this.showConflicts(),
@@ -119,6 +127,7 @@ export default class DriveSyncPlugin extends Plugin {
 		const onChange = (f: TAbstractFile) => {
 			if (!this.settings.syncAfterEdit || this.syncing) return;
 			if (f.path.startsWith(this.app.vault.configDir + "/")) return;
+			if (this.isLogFile(f.path)) return; // our own log writes must not trigger a sync
 			afterEdit();
 		};
 		this.app.workspace.onLayoutReady(() => {
@@ -164,6 +173,7 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 		this.syncing = true;
 		const progress = manual ? new Notice("Synchronisiere …", 0) : null;
+		const start = new Date();
 		try {
 			const result = await this.engine.run((msg) => {
 				this.statusEl.setText(`☁ ${msg}`);
@@ -172,9 +182,11 @@ export default class DriveSyncPlugin extends Plugin {
 			this.lastSync = Date.now();
 			this.lastError = result.errors[0] ?? "";
 			this.report(result, manual);
+			await this.writeLog(start, result, null);
 		} catch (e) {
 			this.lastError = (e as Error).message;
 			new Notice(`Google Drive Sync: ${this.lastError}`, 8000);
+			await this.writeLog(start, null, this.lastError);
 		} finally {
 			progress?.hide();
 			this.syncing = false;
@@ -186,12 +198,50 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 	}
 
+	isLogFile(path: string): boolean {
+		return this.settings.logEnabled && makeLogMatcher(this.settings.logFolder)(path);
+	}
+
+	ownLogPath(): string {
+		return logPath(this.settings.logFolder, this.settings.deviceName);
+	}
+
+	/** Writes one entry to "Sync-Protokoll/<Gerät>.md" (only this device writes that file). */
+	private async writeLog(start: Date, result: SyncResult | null, fatal: string | null) {
+		if (!this.settings.logEnabled) return;
+		try {
+			const entry = formatEntry(start, Date.now() - start.getTime(), result, fatal, (p) => this.isLogFile(p));
+			if (!entry) return;
+			const path = this.ownLogPath();
+			const vault = this.app.vault;
+			const existing = vault.getAbstractFileByPath(path);
+			if (existing instanceof TFile) {
+				await vault.process(existing, (old) => addEntry(old, entry, this.settings.deviceName));
+				return;
+			}
+			const folder = this.settings.logFolder.replace(/^\/+|\/+$/g, "");
+			if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder).catch(() => undefined);
+			await vault.create(path, addEntry("", entry, this.settings.deviceName));
+		} catch (e) {
+			console.error("[Google Drive Sync] Protokoll konnte nicht geschrieben werden", e);
+		}
+	}
+
+	async openLog() {
+		const f = this.app.vault.getAbstractFileByPath(this.ownLogPath());
+		if (f instanceof TFile) await this.app.workspace.getLeaf(false).openFile(f);
+		else new Notice("Noch kein Protokoll vorhanden – es entsteht bei der ersten Übertragung.");
+	}
+
 	private report(r: SyncResult, manual: boolean) {
+		// Transfers of the log files themselves are not worth a notice.
+		const ev = r.events.filter((e) => !this.isLogFile(e.path));
+		const n = (...kinds: string[]) => ev.filter((e) => kinds.includes(e.kind)).length;
 		const parts: string[] = [];
-		if (r.uploaded) parts.push(`↑ ${r.uploaded}`);
-		if (r.downloaded) parts.push(`↓ ${r.downloaded}`);
-		if (r.deleted) parts.push(`🗑 ${r.deleted}`);
-		if (r.merged) parts.push(`${r.merged} zusammengeführt`);
+		if (n("up")) parts.push(`↑ ${n("up")}`);
+		if (n("down")) parts.push(`↓ ${n("down")}`);
+		if (n("delLocal", "delRemote")) parts.push(`🗑 ${n("delLocal", "delRemote")}`);
+		if (n("merged")) parts.push(`${n("merged")} zusammengeführt`);
 		if (r.marked.length) {
 			const n = new Notice(
 				`Google Drive Sync: In ${r.marked.length} Notiz(en) wurde dieselbe Stelle auf zwei Geräten geändert. ` +
@@ -326,6 +376,8 @@ export default class DriveSyncPlugin extends Plugin {
 				syncOnResume: true,
 				excludes: ".trash/**\n# Eigene Ausschlüsse, z. B.:\n# Privat/**\n# *.mp4",
 				showNotices: false,
+				logEnabled: true,
+				logFolder: "Sync-Protokoll",
 			},
 			data.settings
 		);
@@ -626,6 +678,33 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			cfgToggle("Allgemeine Einstellungen", "Editor, Dateien & Links, Tastenkürzel, Kern-Plugins, Lesezeichen …", "settings");
 			cfgToggle("Darstellung", "Themes und CSS-Snippets", "appearance");
 			cfgToggle("Community-Plugins", "Installierte Plugins, ob sie aktiv sind, und ihre Einstellungen", "plugins");
+		}
+
+		containerEl.createEl("h3", { text: "Protokoll" });
+		new Setting(containerEl)
+			.setName("Sync-Protokoll schreiben")
+			.setDesc(
+				`Jedes Gerät schreibt in eine eigene Notiz („${s.logFolder}/${s.deviceName}.md“). So kannst du z. B. am ` +
+					"Computer nachlesen, was auf dem iPad passiert ist. Einträge nur bei Übertragungen und Fehlern."
+			)
+			.addToggle((t) =>
+				t.setValue(s.logEnabled).onChange(async (v) => {
+					s.logEnabled = v;
+					await p.saveAll();
+					this.display();
+				})
+			)
+			.addButton((b) => b.setButtonText("Öffnen").onClick(() => p.openLog()));
+		if (s.logEnabled) {
+			new Setting(containerEl)
+				.setName("Ordner für Protokolle")
+				.setDesc("Auf allen Geräten gleich lassen.")
+				.addText((t) =>
+					t.setValue(s.logFolder).onChange(async (v) => {
+						s.logFolder = v.trim() || "Sync-Protokoll";
+						await p.saveAll();
+					})
+				);
 		}
 
 		containerEl.createEl("h3", { text: "Erweitert" });

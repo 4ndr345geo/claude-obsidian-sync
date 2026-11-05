@@ -150,6 +150,26 @@ Synchronisieren und danach die anderen Geräte einschalten.
   „Ausschließen“ eine Zeile wie `.obsidian/plugins/obsidian-git/**` eintragen.
 - **Abschalten** löscht nichts, weder lokal noch in Google Drive.
 
+## Sync-Protokoll
+
+Jedes Gerät schreibt ein Protokoll als Notiz nach **`Sync-Protokoll/<Gerätename>.md`**. Weil jedes Gerät
+nur seine eigene Datei schreibt, gibt es dabei keine Konflikte. Die Protokolle werden ganz normal
+synchronisiert, du kannst also z. B. am Computer nachlesen, was auf dem iPad passiert ist.
+
+```markdown
+## 05.11.2026 14:03:12 · ✓ 2,1 s
+- ↑ 1 · ↓ 2 · ⚠ 1
+- ⚠ Konflikt in der Notiz markiert: [[Einkauf]]
+- ↓ heruntergeladen: [[Projekte/Idee]]
+- ↓ heruntergeladen: `.obsidian/app.json`
+- ↑ hochgeladen: [[Tagebuch/2026-11-05]]
+```
+
+- Einträge entstehen nur, wenn etwas übertragen wurde oder ein Fehler auftrat. Neueste stehen oben,
+  alte werden automatisch entfernt (max. ca. 500 Zeilen).
+- Zugangsdaten (Token, Secret, Verbindungscode) werden nie protokolliert.
+- Befehl: **„Sync-Protokoll dieses Geräts öffnen“**. Abschalten und Ordner ändern geht in den Plugin-Einstellungen.
+
 ## Entwicklung
 
 ```bash
@@ -164,6 +184,8 @@ Aufbau:
 - `src/sync.ts`: führt den Plan aus
 - `src/drive.ts`: Google Drive API (v3)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode
+- `src/config.ts`: welche Dateien aus `.obsidian` synchronisiert werden
+- `src/log.ts`: Sync-Protokoll pro Gerät
 - `src/main.ts`: Plugin, Einstellungen, automatische Auslöser
 
 ### Neue Version veröffentlichen
