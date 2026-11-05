@@ -241,7 +241,10 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 		const min = Math.floor((Date.now() - this.lastSync) / 60_000);
 		this.statusEl.setText(min < 1 ? "☁ ✓ gerade eben" : `☁ ✓ vor ${min} Min.`);
-		this.statusEl.setAttr("aria-label", "Klicken zum Synchronisieren");
+		this.statusEl.setAttr(
+			"aria-label",
+			`Klicken zum Synchronisieren · ${this.manifest.name} ${this.manifest.version}`
+		);
 	}
 
 	async loadAll() {
@@ -296,6 +299,18 @@ class DriveSyncSettingTab extends PluginSettingTab {
 		const p = this.plugin;
 		const s = p.settings;
 		containerEl.empty();
+
+		// Header with the installed version
+		const releases = "https://github.com/4ndr345geo/claude-obsidian-sync/releases";
+		new Setting(containerEl)
+			.setName(p.manifest.name)
+			.setDesc(`Installierte Version: ${p.manifest.version}`)
+			.addExtraButton((b) =>
+				b
+					.setIcon("external-link")
+					.setTooltip("Alle Versionen und Änderungen auf GitHub")
+					.onClick(() => window.open(releases))
+			);
 
 		containerEl.createEl("h3", { text: "Verbindung" });
 		const status = containerEl.createDiv({ cls: "setting-item-description" });
