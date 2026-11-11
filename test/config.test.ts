@@ -14,7 +14,8 @@ test("Filter: was aus .obsidian synchronisiert wird", () => {
   for (const p of [".obsidian/workspace.json", ".obsidian/workspace-mobile.json",
     ".obsidian/plugins/gdrive-vault-sync/data.json", ".obsidian/plugins/gdrive-vault-sync/base/x.txt",
     ".obsidian/plugins/obsidian-git/.git/config", ".obsidian/plugins/x/node_modules/a.js",
-    "Notiz.md", ".obsidian/irgendwas.txt"]) assert.ok(!f(p), p);
+    "Notiz.md", ".obsidian/irgendwas.txt", ".obsidian/sync-history/2026-11-11/10-00-00-000/a.md",
+    ".obsidian/sync-history/2026-11-11/10-00-00-000/.obsidian/app.json"]) assert.ok(!f(p), p);
   const off = makeConfigFilter(".obsidian", "gdrive-vault-sync", { ...all, enabled: false });
   assert.ok(!off(".obsidian/app.json"));
   const noPlugins = makeConfigFilter(".obsidian", "gdrive-vault-sync", { ...all, plugins: false });
@@ -89,7 +90,7 @@ test("Sync: deinstalliertes Plugin wird auf den anderen Geräten entfernt", asyn
   a.vault.hidden.delete(".obsidian/plugins/alt/main.js");
   a.vault.hidden.delete(".obsidian/plugins/alt/manifest.json");
   await a.sync(); await b.sync();
-  assert.ok(![...b.vault.hidden.keys()].some((k) => k.includes("plugins/alt") && !k.includes("/backups/")));
+  assert.ok(![...b.vault.hidden.keys()].some((k) => k.includes("plugins/alt") && !k.includes("/sync-history/")));
 });
 
 test("Sync: Gerät ohne Einstellungs-Sync ignoriert fremde Einstellungen und löscht nichts", async () => {

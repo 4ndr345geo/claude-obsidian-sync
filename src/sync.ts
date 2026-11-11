@@ -4,6 +4,7 @@ import { DriveClient, DriveError } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
 import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
 import { BackupOptions, BackupStore } from "./backup";
+import { BACKUP_FOLDER } from "./config";
 import { Failures, FailureTracker, fingerprint } from "./isolation";
 import { isSafeSyncPath } from "./paths";
 import { Action, BaseEntry, LocalEntry, planSync, RemoteEntry } from "./plan";
@@ -37,6 +38,11 @@ export interface SyncSettingsView {
  * (that needs several times their size in memory and can crash the app on a
  * phone). They are handled like images: both versions are kept.
  */
+/** Local backups: inside the settings folder, outside this plugin's folder (kept on uninstall). */
+export function backupDir(configDir: string): string {
+	return `${configDir}/${BACKUP_FOLDER}`;
+}
+
 export const MAX_TEXT_BYTES = 15 * 1024 * 1024;
 
 /** The file in Google Drive changed after the list was read – it must not be overwritten blindly. */
@@ -184,8 +190,9 @@ export class SyncEngine {
 	) {
 		this.backups = new BackupStore(
 			this.app.vault.adapter as never,
-			normalizePath(baseDir).replace(/\/base$/, "") + "/backups",
-			() => this.settings().backup
+			backupDir(this.app.vault.configDir),
+			() => this.settings().backup,
+			normalizePath(baseDir).replace(/\/base$/, "") + "/backups"
 		);
 	}
 
@@ -511,6 +518,7 @@ export class SyncEngine {
 		for (const folder of listing.folders) {
 			// Skip folders that can never contain synchronised files.
 			if (folder === normalizePath(this.baseDir).replace(/\/base$/, "")) continue;
+			if (folder === this.backups.dir) continue;
 			await this.scanConfig(folder, c);
 		}
 	}

@@ -292,7 +292,7 @@ Synchronisieren und danach die anderen Geräte einschalten.
 
 Bevor die Synchronisierung eine Datei **auf diesem Gerät überschreibt oder löscht**, wird die
 bisherige Version gesichert, in
-`.obsidian/plugins/gdrive-vault-sync/backups/<Datum>/<Uhrzeit>/<Pfad>`.
+`.obsidian/sync-history/<Datum>/<Uhrzeit>/<Pfad>`.
 
 - Das betrifft: Download einer neueren Version, Zusammenführen, Löschen (auch Einstellungsdateien,
   die sonst endgültig gelöscht würden), Einstellungen von anderen Geräten, Wiederherstellen.
@@ -305,8 +305,10 @@ bisherige Version gesichert, in
 - Aufbewahrung: 30 Tage, höchstens 300 MB (einstellbar) und höchstens 50 Versionen pro Datei. Dateien über einem Viertel davon
   (höchstens 50 MB) werden nicht gesichert; für sie hält Google Drive alte Versionen 30 Tage lang.
 - Die Sicherungen bleiben **nur auf diesem Gerät** und werden nicht synchronisiert. Sie sind
-  unverschlüsselt und werden beim Deinstallieren des Plugins mit gelöscht. Sie ersetzen kein
-  echtes Backup des Vaults.
+  unverschlüsselt und bleiben auch nach dem Deinstallieren des Plugins erhalten (Ordner bei
+  Bedarf von Hand löschen). Sie ersetzen kein echtes Backup des Vaults.
+- Sicherungen aus Version 1.6.0–1.7.0 (damals im Plugin-Ordner) werden beim ersten Start
+  automatisch nach `sync-history` verschoben.
 - Die Sync-Protokolle anderer Geräte werden nicht gesichert.
 
 ## Ausweichwege

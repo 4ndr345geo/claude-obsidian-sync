@@ -98,6 +98,11 @@ export class FakeVault {
       return typeof e.data === "string" ? buf(e.data) : copy(e.data);
     },
     remove: async (p: string) => void this.hidden.delete(p),
+    rename: async (a: string, b: string) => {
+      for (const k of [...this.hidden.keys()]) {
+        if (k === a || k.startsWith(a + "/")) { const e = this.hidden.get(k)!; this.hidden.delete(k); this.hidden.set(b + k.slice(a.length), e); }
+      }
+    },
     copy: async (a: string, b: string) => { const e = this.hidden.get(a); if (e) this.hidden.set(b, { ...e }); },
     stat: async (p: string) => {
       const e = this.hidden.get(p);

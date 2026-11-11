@@ -17,8 +17,9 @@ betrieben.
   den Einstellungen des Plugins im Vault-Ordner.
 
 - **Lokale Sicherungen.** Frühere Versionen von Dateien, die die Synchronisierung
-  überschreibt oder löscht, werden nur auf dem jeweiligen Gerät im Ordner des Plugins
-  gespeichert (standardmäßig 30 Tage) und nicht übertragen.
+  überschreibt oder löscht, werden nur auf dem jeweiligen Gerät im Ordner
+  `.obsidian/sync-history` gespeichert (standardmäßig 30 Tage) und nicht übertragen. Der Ordner
+  bleibt nach dem Deinstallieren erhalten und kann von Hand gelöscht werden.
 
 ## Zugriff auf Google Drive
 

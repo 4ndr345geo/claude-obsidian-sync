@@ -1063,7 +1063,7 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			.setName("Lokale Sicherung vor dem Überschreiben")
 			.setDesc(
 				"Bevor die Synchronisierung eine Datei auf diesem Gerät überschreibt oder löscht, wird die bisherige Version " +
-					`in ${this.app.vault.configDir}/plugins/${p.manifest.id}/backups gesichert (nur auf diesem Gerät). ` +
+					`in ${this.app.vault.configDir}/sync-history gesichert (nur auf diesem Gerät, bleibt auch nach dem Deinstallieren erhalten). ` +
 					"Zurückholen: Befehl „Frühere Version aus lokaler Sicherung wiederherstellen“."
 			)
 			.addToggle((t) =>

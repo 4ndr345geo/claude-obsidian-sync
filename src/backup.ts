@@ -1,9 +1,11 @@
 /**
  * Local backups: before the sync overwrites or deletes a file on this device,
  * the previous version is copied to
- *   .obsidian/plugins/gdrive-vault-sync/backups/<date>/<time>/<path in the vault>
- * One time folder per sync run. The folder is device-local (never synchronised)
- * and is cleaned up automatically (age, total size, versions per file).
+ *   .obsidian/sync-history/<date>/<time>/<path in the vault>
+ * One time folder per sync run. The folder is device-local (never synchronised),
+ * is cleaned up automatically (age, total size, versions per file) and is kept
+ * when the plugin is uninstalled. Version 1.6.0–1.7.0 kept the backups in the
+ * plugin folder; they are moved here on first use.
  */
 
 export interface BackupOptions {
@@ -38,6 +40,7 @@ export interface BackupAdapter {
 	stat(path: string): Promise<{ type: string; size: number; mtime: number } | null>;
 	rmdir(path: string, recursive: boolean): Promise<void>;
 	remove(path: string): Promise<void>;
+	rename(path: string, newPath: string): Promise<void>;
 }
 
 const pad = (n: number, l = 2) => String(n).padStart(l, "0");
@@ -67,7 +70,41 @@ export class BackupStore {
 	skipped = 0;
 	count = 0;
 
-	constructor(private adapter: BackupAdapter, readonly dir: string, private options: () => BackupOptions) {}
+	private migrated: Promise<void> | null = null;
+
+	/**
+	 * @param legacyDir earlier location of the backups; moved to `dir` once
+	 */
+	constructor(
+		private adapter: BackupAdapter,
+		readonly dir: string,
+		private options: () => BackupOptions,
+		private legacyDir?: string
+	) {}
+
+	/** Moves backups from the earlier location (once; never fails – old backups simply stay where they are). */
+	ready(): Promise<void> {
+		this.migrated ??= this.migrate().catch((e) =>
+			console.warn("[Google Drive Sync] Alte Sicherungen konnten nicht verschoben werden", e)
+		);
+		return this.migrated;
+	}
+
+	private async migrate() {
+		const old = this.legacyDir;
+		if (!old || old === this.dir || !(await this.adapter.exists(old))) return;
+		const files: string[] = [];
+		await this.walk(old, async (f) => void files.push(f));
+		for (const f of files) {
+			const target = this.dir + f.slice(old.length);
+			if (await this.adapter.exists(target)) continue; // keep both: the old copy stays
+			await this.mkdirs(target.slice(0, target.lastIndexOf("/")));
+			await this.adapter.rename(f, target);
+		}
+		const left: string[] = [];
+		await this.walk(old, async (f) => void left.push(f));
+		if (!left.length) await this.adapter.rmdir(old, true);
+	}
 
 	/** Starts a new time folder (one per sync run or restore). */
 	beginRun(now = new Date()) {
@@ -91,6 +128,7 @@ export class BackupStore {
 	 * @throws  if the copy could not be written – the caller must then not change the file
 	 */
 	async save(original: string, data: ArrayBuffer): Promise<string | null> {
+		await this.ready();
 		const o = this.options();
 		if (!o.enabled) return null;
 		if (data.byteLength > o.maxFileBytes) {
@@ -109,6 +147,7 @@ export class BackupStore {
 
 	/** All backups, newest first. */
 	async list(): Promise<BackupEntry[]> {
+		await this.ready();
 		const out: BackupEntry[] = [];
 		if (!(await this.adapter.exists(this.dir))) return out;
 		for (const dayDir of (await this.adapter.list(this.dir)).folders) {
@@ -144,6 +183,7 @@ export class BackupStore {
 	 * @returns number of removed run folders
 	 */
 	async prune(now = Date.now()): Promise<number> {
+		await this.ready();
 		if (!(await this.adapter.exists(this.dir))) return 0;
 		const o = this.options();
 		// 1) Per file: keep only the newest versions.

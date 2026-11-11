@@ -7,7 +7,7 @@ import { decodeStrict } from "../src/sync";
 import { setRequestHandler } from "./obsidian-mock";
 import { FakeDrive, FakeVault, buf, device } from "./fakes";
 
-const DIR = ".obsidian/plugins/gdrive-vault-sync/backups";
+const DIR = ".obsidian/sync-history";
 const dec = new TextDecoder();
 const backupsOf = (v: FakeVault) => [...v.hidden.keys()].filter((k) => k.startsWith(DIR + "/"));
 
@@ -27,7 +27,7 @@ test("Download überschreibt eine Notiz: die bisherige Version wird gesichert", 
   assert.equal(r.backedUp, 1);
   const files = backupsOf(b.vault);
   assert.equal(files.length, 1);
-  assert.match(files[0], /backups\/\d{4}-\d{2}-\d{2}\/\d{2}-\d{2}-\d{2}-\d{3}\/n\.md$/);
+  assert.match(files[0], /sync-history\/\d{4}-\d{2}-\d{2}\/\d{2}-\d{2}-\d{2}-\d{3}\/n\.md$/);
   assert.equal(b.vault.hiddenText(files[0]), "alt");
   assert.equal(backupsOf(a.vault).length, 0, "Upload ändert lokal nichts, also keine Sicherung");
 });
@@ -189,4 +189,31 @@ test("Fallback: Papierkorb nicht verfügbar – Datei wird trotzdem gelöscht (v
   assert.deepEqual(trashed, [true, false], "System-Papierkorb, dann .trash im Vault");
   assert.equal(b.vault.text("weg.md"), undefined);
   assert.equal((await b.engine.backups.list())[0].original, "weg.md");
+});
+
+test("Speicherort: .obsidian/sync-history, wird nie synchronisiert und nie als Einstellung gescannt", async () => {
+  const drive = new FakeDrive();
+  const a = device(drive, "Laptop", true), b = device(drive, "Handy", true);
+  a.vault.set("n.md", buf("alt"));
+  await a.sync(); await b.sync();
+  a.vault.set("n.md", buf("neu"));
+  await a.sync(); await b.sync();
+  assert.equal(backupsOf(b.vault).length, 1);
+  await b.sync(); await a.sync();
+  assert.ok(![...drive.files.values()].some((f) => f.path.includes("sync-history")), "nicht in Google Drive");
+  assert.equal(backupsOf(a.vault).length, 0, "nicht auf das andere Gerät übertragen");
+});
+
+test("Umzug: Sicherungen aus dem alten Plugin-Ordner werden nach sync-history verschoben", async () => {
+  const { b } = setup();
+  const OLD = ".obsidian/plugins/gdrive-vault-sync/backups";
+  b.vault.setHidden(`${OLD}/2026-11-10/09-00-00-000/Notiz.md`, "alte Sicherung");
+  b.vault.setHidden(`${OLD}/2026-11-10/09-00-00-000/.obsidian/app.json`, "{}");
+  b.vault.setHidden(`${DIR}/2026-11-10/09-00-00-000/Notiz.md`, "schon vorhanden");
+  const list = await b.engine.backups.list();
+  assert.deepEqual(list.map((e) => e.original).sort(), [".obsidian/app.json", "Notiz.md"]);
+  assert.equal(b.vault.hiddenText(`${DIR}/2026-11-10/09-00-00-000/.obsidian/app.json`), "{}");
+  assert.equal(b.vault.hiddenText(`${DIR}/2026-11-10/09-00-00-000/Notiz.md`), "schon vorhanden", "nichts überschrieben");
+  assert.equal(b.vault.hiddenText(`${OLD}/2026-11-10/09-00-00-000/Notiz.md`), "alte Sicherung", "Doppelte bleibt am alten Ort");
+  assert.equal([...b.vault.hidden.keys()].filter((k) => k.startsWith(OLD)).length, 1);
 });

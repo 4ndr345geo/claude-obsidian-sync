@@ -14,6 +14,9 @@ export interface ConfigSyncOptions {
 	plugins: boolean;
 }
 
+/** Folder in the settings folder with this device's local backups (never synchronised). */
+export const BACKUP_FOLDER = "sync-history";
+
 /** Device-specific files that are never synchronised. */
 const NEVER = new Set(["workspace.json", "workspace-mobile.json", "workspaces.json"]);
 const NEVER_SEGMENTS_CANON = new Set([".git", "node_modules", ".ds_store", "thumbs.db", ".hotreload"]);
@@ -32,6 +35,7 @@ export function makeConfigFilter(configDir: string, ownPluginId: string, o: Conf
 		// "Plugins/GDrive-Vault-Sync" cannot be used to reach this plugin's folder.
 		const parts = rel.split("/").map(canonicalSegment);
 		if (parts.some((p) => !p || NEVER_SEGMENTS_CANON.has(p))) return false;
+		if (parts[0] === BACKUP_FOLDER) return false;
 		if (parts.length === 1) {
 			if (NEVER.has(parts[0]) || !parts[0].endsWith(".json")) return false;
 			if (parts[0] === "community-plugins.json") return o.plugins;
