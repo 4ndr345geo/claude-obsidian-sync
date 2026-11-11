@@ -1,4 +1,64 @@
+# --- Build und Abhängigkeiten ---
 node_modules/
 main.js
+*.js.map
 *.zip
 test/.out/
+
+# --- Zugangsdaten: niemals committen ---
+# Plugin-Daten von Obsidian (enthalten bei älteren Obsidian-Versionen
+# Client-Secret und Refresh-Token) und die Basis-Kopien der Notizen.
+# Entstehen hier, wenn das Repo direkt im Plugin-Ordner eines Vaults liegt.
+/data.json
+/data.json.*
+/base/
+# Aus der Google Cloud Console heruntergeladene OAuth-Clients und Dienstkonten
+client_secret*.json
+credentials*.json
+token*.json
+*service-account*.json
+*serviceaccount*.json
+# Umgebungsdateien (Vorlagen wie .env.example bleiben erlaubt)
+.env
+.env.*
+!.env.example
+!.env.sample
+# Schlüssel und Zertifikate
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+# Paketmanager-Konfiguration kann Zugangstoken enthalten
+.npmrc
+.yarnrc.yml
+# Verbindungscode des Plugins, falls er in eine Datei kopiert wurde
+*verbindungscode*
+*connection-code*
+
+# --- Vaults und Notizen (Testdaten gehören nicht ins Repo) ---
+.obsidian/
+.trash/
+/vault/
+/test-vault/
+
+# --- Protokolle und temporäre Dateien ---
+*.log
+npm-debug.log*
+*.tmp
+*.bak
+*.swp
+*~
+
+# --- Betriebssystem und Editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+.hotreload
