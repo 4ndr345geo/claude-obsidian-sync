@@ -7,6 +7,7 @@ import {
 	Platform,
 	Plugin,
 	PluginSettingTab,
+	requestUrl,
 	Setting,
 	TAbstractFile,
 	TFile,
@@ -218,6 +219,19 @@ export default class DriveSyncPlugin extends Plugin {
 				const prev = conflictList[(idx - 1 + conflictList.length) % conflictList.length];
 				await this.app.workspace.getLeaf().openFile(prev);
 				new Notice(`Konflikt (${((idx - 1 + conflictList.length) % conflictList.length) + 1}/${conflictList.length}): ${prev.basename}`);
+			},
+		});
+
+		this.addCommand({
+			id: "disconnect-all-devices",
+			name: "Sync: Alle Geräte abmelden (Google-Zugriff widerrufen)",
+			callback: async () => {
+				const confirmed = confirm(
+					"Möchtest du wirklich alle Geräte abmelden?\n\nDie Google Drive-Autorisierung wird widerrufen und alle synchronisierenden Geräte werden abgemeldet."
+				);
+				if (confirmed) {
+					await this.disconnectAllDevices();
+				}
 			},
 		});
 
@@ -504,6 +518,32 @@ export default class DriveSyncPlugin extends Plugin {
 			onDone?.();
 			void this.sync(true);
 		}).open();
+	}
+
+	/**
+	 * Disconnects and logs out all synchronising devices by revoking the shared
+	 * Google OAuth token and clearing credentials.
+	 */
+	async disconnectAllDevices(): Promise<boolean> {
+		const token = this.settings.refreshToken;
+		if (token) {
+			try {
+				await requestUrl({
+					url: `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`,
+					method: "POST",
+					headers: { "Content-Type": "application/x-www-form-urlencoded" },
+				});
+			} catch (e) {
+				console.warn("Could not revoke token with Google:", e);
+			}
+		}
+		this.settings.refreshToken = "";
+		if (!Platform.isDesktopApp) this.settings.clientSecret = "";
+		this.massDelete = null;
+		await this.saveAll();
+		new Notice("Alle Geräte abgemeldet: Die Google Drive-Autorisierung wurde widerrufen.");
+		this.renderStatus();
+		return true;
 	}
 
 	async openNote(path: string) {
@@ -998,19 +1038,40 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			);
 
 		if (p.isConnected()) {
-			new Setting(containerEl).setName("Trennen").addButton((b) =>
-				b
-					.setButtonText("Verbindung trennen")
-					.setWarning()
-					.onClick(async () => {
-						s.refreshToken = "";
-						// On phones/tablets the secret only came from the connection code.
-						if (!Platform.isDesktopApp) s.clientSecret = "";
-						await p.saveAll();
-						this.display();
-						p.renderStatus();
-					})
-			);
+			new Setting(containerEl)
+				.setName("Dieses Gerät trennen")
+				.setDesc("Trennt nur dieses einzelne Gerät von Google Drive. Andere Geräte bleiben synchronisiert.")
+				.addButton((b) =>
+					b
+						.setButtonText("Dieses Gerät trennen")
+						.setWarning()
+						.onClick(async () => {
+							s.refreshToken = "";
+							// On phones/tablets the secret only came from the connection code.
+							if (!Platform.isDesktopApp) s.clientSecret = "";
+							await p.saveAll();
+							this.display();
+							p.renderStatus();
+						})
+				);
+
+			new Setting(containerEl)
+				.setName("Alle Geräte abmelden")
+				.setDesc("Widerruft das Google-OAuth-Token. Meldet alle synchronisierenden Geräte (Desktop, Handy, Tablet) gleichzeitig ab.")
+				.addButton((b) =>
+					b
+						.setButtonText("Alle Geräte abmelden")
+						.setWarning()
+						.onClick(async () => {
+							const ok = confirm(
+								"Alle Geräte abmelden?\n\nDie Google Drive-Autorisierung wird widerrufen und alle verbundenen Geräte werden abgemeldet."
+							);
+							if (ok) {
+								await p.disconnectAllDevices();
+								this.display();
+							}
+						})
+				);
 		}
 
 		containerEl.createEl("h3", { text: "Synchronisierung" });
