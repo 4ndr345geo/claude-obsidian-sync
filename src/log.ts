@@ -42,10 +42,22 @@ const LABEL: Record<SyncEvent["kind"], string> = {
 	error: "❌ Fehler",
 };
 
+/**
+ * Text from outside (file names from Google Drive, error messages) is shown as
+ * inline code, where Markdown and HTML are not interpreted. So a file name
+ * cannot place links, images or HTML in the log note.
+ */
+export function code(text: string): string {
+	// eslint-disable-next-line no-control-regex
+	const clean = text.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/`/g, "'").trim();
+	return `\`${clean.slice(0, 300) || " "}\``;
+}
+
 function link(path: string): string {
 	// Wiki links for notes so they can be opened from the log; plain code for everything else.
-	if (path.endsWith(".md") && !path.startsWith(".")) return `[[${path.slice(0, -3)}]]`;
-	return `\`${path}\``;
+	const plain = !/[[\]|#^<>`\\]/.test(path);
+	if (plain && path.endsWith(".md") && !path.startsWith(".")) return `[[${path.slice(0, -3)}]]`;
+	return code(path);
 }
 
 /**
@@ -67,7 +79,7 @@ export function formatEntry(
 	const secs = (durationMs / 1000).toFixed(1).replace(".", ",");
 	const lines = [`## ${formatDateTime(start)} · ${failed ? "❌" : "✓"} ${secs} s`];
 
-	if (fatalError) lines.push(`- ❌ Synchronisierung abgebrochen: ${fatalError}`);
+	if (fatalError) lines.push(`- ❌ Synchronisierung abgebrochen: ${code(fatalError)}`);
 
 	const count = (k: SyncEvent["kind"]) => events.filter((e) => e.kind === k).length;
 	const summary = [
@@ -88,7 +100,7 @@ export function formatEntry(
 	for (const e of sorted.slice(0, MAX_FILES_PER_ENTRY)) {
 		let line = `- ${LABEL[e.kind]}: ${link(e.path)}`;
 		if (e.kind === "copy" && e.detail) line += ` (von ${link(e.detail)})`;
-		if (e.kind === "error" && e.detail) line += ` – ${e.detail}`;
+		if (e.kind === "error" && e.detail) line += ` – ${code(e.detail)}`;
 		lines.push(line);
 	}
 	if (sorted.length > MAX_FILES_PER_ENTRY) lines.push(`- … und ${sorted.length - MAX_FILES_PER_ENTRY} weitere`);

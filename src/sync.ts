@@ -148,6 +148,14 @@ export class SyncEngine {
 		const s = this.settings();
 		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [] };
 
+		// The remembered folder was deleted or trashed in Google Drive: start
+		// over with a new folder and upload, instead of deleting everything here.
+		if (this.state.folderId && this.state.folderName === s.folderName) {
+			if (!(await this.drive.folderUsable(this.state.folderId))) {
+				this.state.folderId = "";
+				this.state.base = {};
+			}
+		}
 		if (!this.state.folderId || this.state.folderName !== s.folderName) {
 			this.state.folderId = await this.drive.ensureFolder(s.folderName);
 			if (this.state.folderName !== s.folderName) {
@@ -254,12 +262,10 @@ export class SyncEngine {
 
 	/** Recursively scans the settings folder (not part of Obsidian's file index). */
 	private async scanConfig(dir: string, excluded: (p: string) => boolean, out: Map<string, LocalEntry>) {
-		let listing: { files: string[]; folders: string[] };
-		try {
-			listing = await this.vault.adapter.list(dir);
-		} catch {
-			return;
-		}
+		// A folder that cannot be read must stop the sync – skipping it would
+		// look as if its files had been deleted on this device.
+		if (!(await this.vault.adapter.exists(dir))) return;
+		const listing = await this.vault.adapter.list(dir);
 		for (const path of listing.files) {
 			if (excluded(path)) continue;
 			const st = await this.vault.adapter.stat(path);
@@ -334,7 +340,7 @@ export class SyncEngine {
 				return;
 			case "download": {
 				if (!(await this.unchangedSinceScan(a.path, local))) return; // edited right now -> next round
-				const data = await this.drive.download(a.remoteId);
+				const data = await this.downloadVerified(a.remoteId, remoteById.get(a.remoteId));
 				await this.writeLocal(a.path, data);
 				await this.setBaseFromData(a.path, data, a.remoteId);
 				r.downloaded++;
@@ -382,7 +388,7 @@ export class SyncEngine {
 		const file = this.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) return;
 		const localData = await this.vault.readBinary(file);
-		const remoteData = await this.drive.download(remoteId);
+		const remoteData = await this.downloadVerified(remoteId, remote);
 
 		// 1) Text notes: three-way merge. Uncritical changes are combined,
 		//    critical ones are marked directly in the note.
@@ -399,8 +405,19 @@ export class SyncEngine {
 				{ label: remote?.device ?? "anderes Gerät", time: remote?.modifiedTime ?? 0 }
 			);
 			const merged = new TextEncoder().encode(m.text).buffer as ArrayBuffer;
+			// Upload first. If it fails, nothing has changed on this device, and the
+			// next sync starts from the same state (otherwise the conflict marking
+			// would be merged again and again and the note would keep growing).
+			const entry = await this.drive.upload(
+				this.state.folderId,
+				path,
+				merged,
+				this.settings().deviceName,
+				remoteId,
+				Date.now()
+			);
 			if (m.text !== localText) await this.writeLocal(path, merged);
-			await this.uploadData(path, merged, remoteId);
+			await this.setBaseFromData(path, merged, entry.id);
 			if (m.clean) r.merged++;
 			else r.marked.push(path);
 			return;
@@ -410,19 +427,22 @@ export class SyncEngine {
 		//    the newer version keeps the name, the older one becomes a copy.
 		const remoteTime = remote?.modifiedTime ?? 0;
 		const localWins = file.stat.mtime >= remoteTime;
+		// Order matters: the conflict has to be settled before anything that can
+		// fail over the network, otherwise every retry would create another copy.
+		// A copy that could not be uploaded is simply a new file for the next sync.
 		if (localWins) {
 			const copy = this.freePath(conflictPath(path, remote?.device ?? "anderes Gerät"));
-			await this.writeLocal(copy, remoteData);
-			await this.uploadPath(copy);
 			await this.uploadData(path, localData, remoteId);
+			await this.writeLocal(copy, remoteData);
 			r.conflicts.push(copy);
+			await this.uploadPath(copy);
 		} else {
 			const copy = this.freePath(conflictPath(path, this.settings().deviceName));
 			await this.writeLocal(copy, localData);
-			await this.uploadPath(copy);
 			await this.writeLocal(path, remoteData);
 			await this.setBaseFromData(path, remoteData, remoteId);
 			r.conflicts.push(copy);
+			await this.uploadPath(copy);
 		}
 	}
 
@@ -441,7 +461,7 @@ export class SyncEngine {
 		const st = await this.statLocal(path);
 		const localData = await this.readLocal(path);
 		if (!st || !localData) return;
-		const remoteData = await this.drive.download(remoteId);
+		const remoteData = await this.downloadVerified(remoteId, remote);
 		const localNewer = st.mtime >= (remote?.modifiedTime ?? 0);
 
 		let result: ArrayBuffer = localNewer ? localData : remoteData;
@@ -470,12 +490,23 @@ export class SyncEngine {
 			await this.drive.trash(dup.id);
 			return;
 		}
-		const data = await this.drive.download(dup.id);
+		const data = await this.downloadVerified(dup.id, dup);
 		const copy = this.freePath(conflictPath(dup.path, dup.device ?? "anderes Gerät"));
 		await this.writeLocal(copy, data);
-		await this.uploadPath(copy);
+		// Remove the duplicate before uploading the copy: if the upload fails,
+		// the copy is uploaded by the next sync instead of being created again.
 		await this.drive.trash(dup.id);
 		r.conflicts.push(copy);
+		await this.uploadPath(copy);
+	}
+
+	/** Downloads a file and makes sure it arrived completely and unchanged. */
+	private async downloadVerified(id: string, remote: RemoteEntry | undefined): Promise<ArrayBuffer> {
+		const data = await this.drive.download(id);
+		if (remote?.md5 && md5(data) !== remote.md5) {
+			throw new Error("Download unvollständig oder Datei gerade geändert – wird beim nächsten Mal erneut versucht.");
+		}
+		return data;
 	}
 
 	private async uploadPath(path: string, remoteId?: string): Promise<void> {

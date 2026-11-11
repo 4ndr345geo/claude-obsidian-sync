@@ -12,13 +12,20 @@ const copy = (b: ArrayBuffer) => b.slice(0);
 export class FakeDrive {
   files = new Map<string, { path: string; data: ArrayBuffer; modifiedTime: number; device: string; trashed: boolean }>();
   n = 0;
-  async ensureFolder() { return "folder"; }
+  /** Test switches: simulate a lost folder / failing or damaged transfers. */
+  folderGone = false; failUpload = false; corruptDownload = false; folders = 0;
+  async ensureFolder() { this.folders++; this.folderGone = false; return "folder" + this.folders; }
+  async folderUsable() { return !this.folderGone; }
   async listFiles(): Promise<RemoteEntry[]> {
     return [...this.files.entries()].filter(([, f]) => !f.trashed).map(([id, f]) => ({
       id, path: f.path, md5: SparkMD5.ArrayBuffer.hash(f.data), modifiedTime: f.modifiedTime, device: f.device }));
   }
-  async download(id: string) { return copy(this.files.get(id)!.data); }
+  async download(id: string) {
+    const d = copy(this.files.get(id)!.data);
+    return this.corruptDownload ? d.slice(0, Math.floor(d.byteLength / 2)) : d;
+  }
   async upload(_f: string, path: string, data: ArrayBuffer, device: string, id?: string, mtime?: number): Promise<RemoteEntry> {
+    if (this.failUpload) throw new Error("Upload fehlgeschlagen");
     id = id ?? `id${++this.n}`;
     const modifiedTime = mtime ?? tick();
     this.files.set(id, { path, data: copy(data), modifiedTime, device, trashed: false });

@@ -25,7 +25,7 @@ test("Eintrag: Zusammenfassung, Fehler und Konflikte zuerst, Links zu Notizen", 
   const lines = e.split("\n");
   assert.equal(lines[0], "## 05.11.2026 14:03:12 · ❌ 2,1 s");
   assert.equal(lines[1], "- ↑ 1 · ↓ 1 · ⚠ 1 · ❌ 1");
-  assert.equal(lines[2], "- ❌ Fehler: `bild.png` – Google Drive Fehler 403");
+  assert.equal(lines[2], "- ❌ Fehler: `bild.png` – `Google Drive Fehler 403`");
   assert.equal(lines[3], "- ⚠ Konflikt in der Notiz markiert: [[Einkauf]]");
   assert.ok(e.includes("↓ heruntergeladen: `.obsidian/app.json`"));
   assert.ok(e.includes("↑ hochgeladen: [[Projekte/Idee]]"));
@@ -33,7 +33,7 @@ test("Eintrag: Zusammenfassung, Fehler und Konflikte zuerst, Links zu Notizen", 
 
 test("Abbruch wird protokolliert", () => {
   const e = formatEntry(new Date(), 50, null, "Anmeldung bei Google fehlgeschlagen (400)", isLog)!;
-  assert.match(e, /❌ Synchronisierung abgebrochen: Anmeldung bei Google fehlgeschlagen/);
+  assert.match(e, /❌ Synchronisierung abgebrochen: `Anmeldung bei Google fehlgeschlagen/);
 });
 
 test("neueste Einträge oben, alte werden entfernt", () => {

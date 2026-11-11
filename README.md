@@ -103,6 +103,22 @@ mindestens die Hälfte aller Dateien löschen (z. B. weil der Drive-Ordner gelee
 Vault nicht vollständig geladen ist), wird nichts geändert. Ein Klick auf die Statusleiste zeigt
 die Zahlen und fragt nach Bestätigung.
 
+**Verhalten bei Fehlern.** Im Zweifel bricht die Synchronisierung ab, statt zu raten:
+
+- Ist der Ordner in Google Drive gelöscht oder im Papierkorb, wird lokal nichts gelöscht. Das
+  Plugin legt einen neuen Ordner an und lädt alles wieder hoch.
+- Jeder Download wird mit der Prüfsumme von Google verglichen. Unvollständige Dateien werden nicht
+  in den Vault geschrieben.
+- Kann eine Datei oder ein Einstellungsordner nicht gelesen werden, wird abgebrochen, damit die
+  Datei nicht als „gelöscht“ gilt.
+- Scheitert ein Upload mitten in einem Konflikt, bleibt die Notiz unverändert und der nächste
+  Versuch beginnt von vorn. Es entstehen keine doppelten Markierungen oder Konfliktkopien.
+- Ohne Internet wartet die automatische Synchronisierung still (Statusleiste: „offline“).
+- Eine beschädigte Einstellungsdatei des Plugins wird gesichert und zurückgesetzt. Notizen sind
+  davon nicht betroffen.
+- Dateinamen und Fehlertexte von außen erscheinen im Sync-Protokoll als Code, damit darüber keine
+  Links, Bilder oder HTML in die Notiz gelangen.
+
 **„Community-Plugins synchronisieren“ überträgt Programmcode.** Wer in deinen Drive-Ordner
 schreiben kann, kann damit Code auf allen Geräten ausführen. Die Option ist standardmäßig aus; nur
 einschalten, wenn dein Google-Konto gut geschützt ist (2-Faktor-Anmeldung).

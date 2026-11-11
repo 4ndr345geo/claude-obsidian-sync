@@ -16,7 +16,8 @@ import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { ConfigSyncOptions } from "./config";
 import { addEntry, formatEntry, logPath, makeLogMatcher } from "./log";
-import { Credentials, DriveClient } from "./drive";
+import { Credentials, DriveClient, DriveError } from "./drive";
+import { isSafeSyncPath } from "./paths";
 import { newInstallId, SecretStore } from "./secrets";
 import { MassDeleteError, SyncEngine, SyncResult, SyncState } from "./sync";
 
@@ -75,6 +76,7 @@ export default class DriveSyncPlugin extends Plugin {
 	private massDelete: MassDeleteError | null = null;
 	/** The user confirmed the deletions for the next run only. */
 	private massDeleteConfirmed = false;
+	private offline = false;
 
 	async onload() {
 		await this.loadAll();
@@ -196,6 +198,7 @@ export default class DriveSyncPlugin extends Plugin {
 		const allowMassDelete = this.massDeleteConfirmed;
 		this.massDeleteConfirmed = false;
 		this.syncing = true;
+		this.offline = false;
 		const progress = manual ? new Notice("Synchronisiere …", 0) : null;
 		const start = new Date();
 		try {
@@ -224,6 +227,11 @@ export default class DriveSyncPlugin extends Plugin {
 						0
 					);
 				}
+			} else if (e instanceof DriveError && e.offline && !manual) {
+				// No connection during an automatic sync is normal (plane, train):
+				// no message and no log entry, the next attempt follows by itself.
+				this.offline = true;
+				return;
 			} else {
 				new Notice(`Google Drive Sync: ${this.lastError}`, 8000);
 			}
@@ -391,6 +399,11 @@ export default class DriveSyncPlugin extends Plugin {
 			this.statusEl.setAttr("aria-label", this.massDelete.message);
 			return;
 		}
+		if (this.offline) {
+			this.statusEl.setText("☁ offline");
+			this.statusEl.setAttr("aria-label", this.lastError);
+			return;
+		}
 		if (this.lastError) {
 			this.statusEl.setText("☁ ⚠ Fehler");
 			this.statusEl.setAttr("aria-label", this.lastError);
@@ -409,9 +422,18 @@ export default class DriveSyncPlugin extends Plugin {
 	}
 
 	async loadAll() {
-		const data = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-		this.settings = Object.assign(
-			{
+		let data: Partial<PluginData> = {};
+		try {
+			const raw = (await this.loadData()) as unknown;
+			if (raw && typeof raw === "object" && !Array.isArray(raw)) data = raw as Partial<PluginData>;
+		} catch (e) {
+			// data.json is damaged (e.g. the device was switched off while writing).
+			// Keep a copy and start with default settings instead of not loading at all.
+			await this.rescueBrokenData(e);
+		}
+		if (!isRecord(data.settings)) data.settings = undefined;
+		if (!isRecord(data.state)) data.state = undefined;
+		const defaults: Settings = {
 				clientId: "",
 				clientSecret: "",
 				refreshToken: "",
@@ -426,9 +448,18 @@ export default class DriveSyncPlugin extends Plugin {
 				logEnabled: true,
 				logFolder: "Sync-Protokoll",
 				installId: "",
-			},
-			data.settings
-		);
+				config: { enabled: false, settings: true, appearance: true, plugins: true },
+		};
+		this.settings = Object.assign({}, defaults, data.settings);
+		// A value of the wrong type (damaged or hand-edited file) falls back to its default.
+		for (const key of Object.keys(defaults) as (keyof Settings)[]) {
+			if (typeof this.settings[key] !== typeof defaults[key]) (this.settings as any)[key] = defaults[key];
+		}
+		if (!isRecord(this.settings.config)) this.settings.config = defaults.config;
+		if (!(this.settings.autoSyncMinutes >= 0 && this.settings.autoSyncMinutes <= 30)) this.settings.autoSyncMinutes = 2;
+		if (!isSafeSyncPath(this.settings.logFolder.replace(/^\/+|\/+$/g, ""), this.app.vault.configDir)) {
+			this.settings.logFolder = defaults.logFolder;
+		}
 		if (!/^[a-z0-9]{6,32}$/.test(this.settings.installId)) this.settings.installId = newInstallId();
 		this.secrets = new SecretStore(this.app, this.manifest.id, this.settings.installId);
 		const inFile = !!(data.settings?.clientSecret || data.settings?.refreshToken);
@@ -438,12 +469,35 @@ export default class DriveSyncPlugin extends Plugin {
 			this.settings.clientSecret ||= this.secrets.get("client-secret");
 			this.settings.refreshToken ||= this.secrets.get("refresh-token");
 		}
-		this.settings.config = Object.assign(
-			{ enabled: false, settings: true, appearance: true, plugins: true },
-			data.settings?.config
-		);
+		this.settings.config = Object.assign({}, defaults.config, this.settings.config);
+		for (const key of Object.keys(defaults.config) as (keyof ConfigSyncOptions)[]) {
+			if (typeof this.settings.config[key] !== "boolean") this.settings.config[key] = defaults.config[key];
+		}
 		this.state = Object.assign({ base: {}, cache: {}, folderId: "", folderName: "" }, data.state);
+		if (!isRecord(this.state.base)) this.state.base = {};
+		if (!isRecord(this.state.cache)) this.state.cache = {};
+		if (typeof this.state.folderId !== "string") this.state.folderId = "";
+		if (typeof this.state.folderName !== "string") this.state.folderName = "";
 		if (inFile && this.secrets.available) await this.saveAll();
+	}
+
+	private async rescueBrokenData(error: unknown) {
+		console.error("[Google Drive Sync] data.json ist beschädigt", error);
+		const file = `${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/data.json`;
+		let kept = "";
+		try {
+			const copy = `${file}.defekt-${Date.now()}`;
+			await this.app.vault.adapter.copy(file, copy);
+			kept = ` Eine Kopie liegt unter ${copy}.`;
+		} catch {
+			/* nothing to keep */
+		}
+		new Notice(
+			"Google Drive Sync: Die Einstellungsdatei des Plugins war beschädigt und wurde zurückgesetzt. " +
+				"Bitte die Einstellungen prüfen und ggf. neu verbinden. Es gehen keine Notizen verloren." +
+				kept,
+			0
+		);
 	}
 
 	/** True if the credentials are kept in Obsidian's keychain instead of data.json. */
@@ -461,6 +515,10 @@ export default class DriveSyncPlugin extends Plugin {
 }
 
 const LINK_ACTION = "gdrive-vault-sync";
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === "object" && v !== null && !Array.isArray(v);
+}
 
 class QrModal extends Modal {
 	constructor(app: App, private code: string) {
@@ -801,7 +859,8 @@ class DriveSyncSettingTab extends PluginSettingTab {
 				.setDesc("Auf allen Geräten gleich lassen.")
 				.addText((t) =>
 					t.setValue(s.logFolder).onChange(async (v) => {
-						s.logFolder = v.trim() || "Sync-Protokoll";
+						const folder = v.trim().replace(/^\/+|\/+$/g, "");
+						s.logFolder = isSafeSyncPath(folder, this.app.vault.configDir) ? folder : "Sync-Protokoll";
 						await p.saveAll();
 					})
 				);
