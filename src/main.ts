@@ -160,6 +160,67 @@ export default class DriveSyncPlugin extends Plugin {
 			callback: () => this.showConflicts(),
 		});
 
+		this.addCommand({
+			id: "copy-claude-project-prompt",
+			name: "Claude: Aktive Notiz als Project Context XML kopieren",
+			checkCallback: (checking) => {
+				const f = this.app.workspace.getActiveFile();
+				if (!f) return false;
+				if (!checking) {
+					void this.app.vault.read(f).then((content) => {
+						const xml = `<context>\n  <note path="${f.path}">\n${content}\n  </note>\n</context>`;
+						void navigator.clipboard.writeText(xml);
+						new Notice(`Notiz [[${f.basename}]] als Claude-XML kopiert`);
+					});
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "next-sync-conflict",
+			name: "Sync: Zur nächsten Notiz mit Sync-Konflikt springen",
+			callback: async () => {
+				const files = this.app.vault.getMarkdownFiles();
+				const conflictList: TFile[] = [];
+				for (const f of files) {
+					const text = await this.app.vault.read(f);
+					if (hasConflictMarkers(text)) conflictList.push(f);
+				}
+				if (conflictList.length === 0) {
+					new Notice("Keine Notizen mit Sync-Konflikten gefunden!");
+					return;
+				}
+				const cur = this.app.workspace.getActiveFile();
+				const idx = cur ? conflictList.findIndex((f) => f.path === cur.path) : -1;
+				const next = conflictList[(idx + 1) % conflictList.length];
+				await this.app.workspace.getLeaf().openFile(next);
+				new Notice(`Konflikt (${((idx + 1) % conflictList.length) + 1}/${conflictList.length}): ${next.basename}`);
+			},
+		});
+
+		this.addCommand({
+			id: "previous-sync-conflict",
+			name: "Sync: Zur vorherigen Notiz mit Sync-Konflikt springen",
+			callback: async () => {
+				const files = this.app.vault.getMarkdownFiles();
+				const conflictList: TFile[] = [];
+				for (const f of files) {
+					const text = await this.app.vault.read(f);
+					if (hasConflictMarkers(text)) conflictList.push(f);
+				}
+				if (conflictList.length === 0) {
+					new Notice("Keine Notizen mit Sync-Konflikten gefunden!");
+					return;
+				}
+				const cur = this.app.workspace.getActiveFile();
+				const idx = cur ? conflictList.findIndex((f) => f.path === cur.path) : 0;
+				const prev = conflictList[(idx - 1 + conflictList.length) % conflictList.length];
+				await this.app.workspace.getLeaf().openFile(prev);
+				new Notice(`Konflikt (${((idx - 1 + conflictList.length) % conflictList.length) + 1}/${conflictList.length}): ${prev.basename}`);
+			},
+		});
+
 		// QR code / link from another device: obsidian://gdrive-vault-sync?code=ODS1:…
 		// Such a link can be opened by any website or app. It is therefore only
 		// accepted while this device is not connected, and never without asking.
