@@ -3,6 +3,7 @@ import SparkMD5 from "spark-md5";
 import { DriveClient, DriveError } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
 import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
+import { Failures, FailureTracker, fingerprint } from "./isolation";
 import { isSafeSyncPath } from "./paths";
 import { Action, BaseEntry, LocalEntry, planSync, RemoteEntry } from "./plan";
 
@@ -12,6 +13,8 @@ export interface SyncState {
 	cache: Record<string, { mtime: number; size: number; hash: string }>;
 	folderId: string;
 	folderName: string;
+	/** Files that failed and are held back for a while (per-file fault isolation). */
+	failures?: Failures;
 }
 
 export interface SyncSettingsView {
@@ -51,6 +54,8 @@ export interface SyncResult {
 	configChanged: boolean;
 	/** What happened, file by file (for the sync log). */
 	events: SyncEvent[];
+	/** Files held back in this run because they failed recently (see isolation.ts). */
+	held: number;
 }
 
 /** Thrown before anything is changed when a sync would delete unusually many files. */
@@ -67,6 +72,15 @@ export class MassDeleteError extends Error {
 export const MASS_DELETE_MIN = 20;
 /** … and at least this share of all files needs a confirmation. */
 export const MASS_DELETE_SHARE = 0.5;
+
+interface ScanContext {
+	excluded: (p: string) => boolean;
+	tracker: FailureTracker;
+	localStat: Map<string, { mtime: number; size: number }>;
+	remoteMd5: Map<string, string[]>;
+	fileFailed: (path: string, e: unknown, kind: "read", fp: string, folder?: boolean) => void;
+	out: Map<string, LocalEntry>;
+}
 
 export function md5(data: ArrayBuffer): string {
 	return SparkMD5.ArrayBuffer.hash(data);
@@ -144,9 +158,24 @@ export class SyncEngine {
 	/**
 	 * @param allowMassDelete  the user confirmed that many deletions are intended
 	 */
-	async run(onProgress?: (msg: string) => void, allowMassDelete = false): Promise<SyncResult> {
+	/**
+	 * @param allowMassDelete  the user confirmed that many deletions are intended
+	 * @param retryFailed      try files that failed recently right away (manual sync)
+	 */
+	async run(onProgress?: (msg: string) => void, allowMassDelete = false, retryFailed = false): Promise<SyncResult> {
 		const s = this.settings();
-		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [] };
+		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [], held: 0 };
+		this.state.failures ??= {};
+		const tracker = new FailureTracker(this.state.failures, retryFailed);
+		/** Reports a failure of one file; a problem that just repeats itself is not reported again. */
+		const fileFailed = (path: string, e: unknown, kind: Parameters<FailureTracker["fail"]>[2], fp: string, folder = false) => {
+			const msg = (e as Error)?.message ?? String(e);
+			const k = e instanceof DriveError ? e.kind : kind;
+			if (tracker.fail(path, msg, k, fp, folder)) {
+				result.errors.push(`${path}: ${msg}`);
+				result.events.push({ kind: "error", path, detail: msg });
+			}
+		};
 
 		// The remembered folder was deleted or trashed in Google Drive: start
 		// over with a new folder and upload, instead of deleting everything here.
@@ -185,11 +214,33 @@ export class SyncEngine {
 		const remoteFiltered = remoteList.filter((r) => !excluded(r.path));
 		const remoteById = new Map(remoteFiltered.map((r) => [r.id, r]));
 
-		onProgress?.("Prüfe lokale Dateien …");
-		const local = await this.scanLocal(excluded);
-		if (s.config.enabled) await this.scanConfig(this.vault.configDir, excluded, local);
+		const remoteMd5 = new Map<string, string[]>();
+		for (const r of remoteFiltered) remoteMd5.set(r.path, [...(remoteMd5.get(r.path) ?? []), r.md5]);
+		/** Current fingerprint of a path (local state + remote checksums). */
+		const localStat = new Map<string, { mtime: number; size: number }>();
+		const fpOf = (path: string) => fingerprint(localStat.get(path) ?? null, remoteMd5.get(path) ?? []);
 
-		const plan = planSync(local, remoteFiltered, this.state.base);
+		onProgress?.("Prüfe lokale Dateien …");
+		const scan: ScanContext = { excluded, tracker, localStat, remoteMd5, fileFailed, out: new Map() };
+		await this.scanLocal(scan);
+		if (s.config.enabled) await this.scanConfig(this.vault.configDir, scan);
+		const local = scan.out;
+
+		// Held-back paths (failed recently, or unreadable right now) take no part
+		// in this run at all: not here, not in Drive, not in the base. So they can
+		// neither be overwritten nor be mistaken for deleted.
+		for (const path of remoteMd5.keys()) tracker.isHeld(path, fpOf(path));
+		for (const path of Object.keys(this.state.base)) {
+			if (!local.has(path) && !remoteMd5.has(path)) continue;
+			tracker.isHeld(path, fpOf(path));
+		}
+		const held = (p: string) => tracker.held.has(p);
+		for (const p of tracker.held) local.delete(p);
+		const remotePlan = remoteFiltered.filter((r) => !held(r.path));
+		const basePlan = Object.fromEntries(Object.entries(this.state.base).filter(([p]) => !held(p)));
+		result.held = tracker.held.size;
+
+		const plan = planSync(local, remotePlan, basePlan);
 		const work = plan.actions.filter((a) => a.type !== "setBase" && a.type !== "dropBase");
 		let done = 0;
 
@@ -197,7 +248,7 @@ export class SyncEngine {
 		// like "everything was deleted on the other side". Stop before that.
 		const delLocal = plan.actions.filter((a) => a.type === "deleteLocal").length;
 		const delRemote = plan.actions.filter((a) => a.type === "deleteRemote").length;
-		const total = Math.max(Object.keys(this.state.base).length, local.size, remoteFiltered.length);
+		const total = Math.max(Object.keys(basePlan).length, local.size, remotePlan.length);
 		if (
 			!allowMassDelete &&
 			delLocal + delRemote >= MASS_DELETE_MIN &&
@@ -209,10 +260,13 @@ export class SyncEngine {
 		for (const dup of plan.duplicates) {
 			const before = snapshot(result);
 			try {
-				await this.resolveDuplicate(dup, remoteFiltered, result);
+				await this.resolveDuplicate(dup, remotePlan, result);
 			} catch (e) {
-				result.errors.push(`${dup.path}: ${(e as Error).message}`);
-				result.events.push({ kind: "error", path: dup.path, detail: (e as Error).message });
+				if (e instanceof DriveError && e.scope === "sync") {
+					await this.persist();
+					throw e;
+				}
+				fileFailed(dup.path, e, "other", fpOf(dup.path));
 			}
 			recordEvents(result, before, dup.path, false);
 		}
@@ -221,9 +275,11 @@ export class SyncEngine {
 		let uploadsBlocked: DriveError | null = null;
 		let skippedUploads = 0;
 
+		const notTried = new Set<string>();
 		for (const action of plan.actions) {
 			if (uploadsBlocked && (action.type === "upload" || action.type === "conflict")) {
 				skippedUploads++;
+				notTried.add(action.path);
 				continue;
 			}
 			try {
@@ -241,6 +297,7 @@ export class SyncEngine {
 				if (e instanceof DriveError && e.kind === "quota") {
 					uploadsBlocked = e;
 					skippedUploads++;
+					notTried.add(action.path);
 					continue;
 				}
 				// Problems that concern everything (login, no connection, Google down,
@@ -249,11 +306,23 @@ export class SyncEngine {
 					await this.persist();
 					throw e;
 				}
-				result.errors.push(`${action.path}: ${(e as Error).message}`);
-				result.events.push({ kind: "error", path: action.path, detail: (e as Error).message });
+				// Everything else concerns only this file: hold it back, go on with the rest.
+				fileFailed(action.path, e, "other", fpOf(action.path));
 			}
 			if (done % 25 === 0) await this.persist();
 		}
+
+		// Files that failed before and went through without error now are fine again.
+		for (const [path, f] of Object.entries(this.state.failures)) {
+			if (f.folder || held(path) || tracker.failed.has(path) || notTried.has(path)) continue;
+			tracker.succeed(path);
+		}
+		// Records of folders/files that exist nowhere any more are dropped.
+		tracker.prune(
+			(p) =>
+				local.has(p) || remoteMd5.has(p) || localStat.has(p) || p in this.state.base ||
+				(this.state.failures![p]?.folder === true && s.config.enabled)
+		);
 		if (uploadsBlocked) {
 			const msg = `${uploadsBlocked.message} – ${skippedUploads} Datei(en) nicht hochgeladen`;
 			result.errors.unshift(msg);
@@ -262,50 +331,104 @@ export class SyncEngine {
 
 		// Forget cache entries for files that are gone or no longer synchronised.
 		for (const p of Object.keys(this.state.cache)) {
-			if (!local.has(p) && !(await this.statLocal(p))) delete this.state.cache[p];
+			if (local.has(p) || localStat.has(p)) continue;
+			try {
+				if (!(await this.statLocal(p))) delete this.state.cache[p];
+			} catch {
+				/* keep the entry; checked again next time */
+			}
 		}
 		await this.persist();
 		return result;
 	}
 
-	private async scanLocal(excluded: (p: string) => boolean): Promise<Map<string, LocalEntry>> {
-		const out = new Map<string, LocalEntry>();
+	/**
+	 * Hashes all vault files. A file that cannot be read is held back (see
+	 * isolation.ts) instead of stopping the run or counting as deleted.
+	 */
+	private async scanLocal(c: ScanContext): Promise<void> {
 		for (const file of this.vault.getFiles()) {
-			if (excluded(file.path)) continue;
+			if (c.excluded(file.path)) continue;
 			const { mtime, size } = file.stat;
+			c.localStat.set(file.path, { mtime, size });
+			const fp = fingerprint({ mtime, size }, c.remoteMd5.get(file.path) ?? []);
+			if (c.tracker.isHeld(file.path, fp)) continue;
 			let cached = this.state.cache[file.path];
 			if (!cached || cached.mtime !== mtime || cached.size !== size) {
-				const data = await this.vault.readBinary(file);
-				cached = { mtime, size, hash: md5(data) };
+				try {
+					const data = await this.vault.readBinary(file);
+					cached = { mtime, size, hash: md5(data) };
+				} catch (e) {
+					c.fileFailed(file.path, new Error(`Datei kann nicht gelesen werden: ${(e as Error)?.message ?? e}`), "read", fp);
+					c.tracker.held.add(file.path);
+					continue;
+				}
 				this.state.cache[file.path] = cached;
 			}
-			out.set(file.path, { path: file.path, hash: cached.hash, mtime });
+			c.out.set(file.path, { path: file.path, hash: cached.hash, mtime });
 		}
-		return out;
 	}
 
-	/** Recursively scans the settings folder (not part of Obsidian's file index). */
-	private async scanConfig(dir: string, excluded: (p: string) => boolean, out: Map<string, LocalEntry>) {
-		// A folder that cannot be read must stop the sync – skipping it would
-		// look as if its files had been deleted on this device.
-		if (!(await this.vault.adapter.exists(dir))) return;
-		const listing = await this.vault.adapter.list(dir);
+	/**
+	 * Recursively scans the settings folder (not part of Obsidian's file index).
+	 * A folder or file that cannot be read is held back as a whole – skipping
+	 * it silently would look as if its files had been deleted on this device.
+	 */
+	private async scanConfig(dir: string, c: ScanContext): Promise<void> {
+		if (c.tracker.isFolderHeld(dir)) {
+			this.holdFolder(dir, c);
+			return;
+		}
+		let listing: { files: string[]; folders: string[] };
+		try {
+			if (!(await this.vault.adapter.exists(dir))) return;
+			listing = await this.vault.adapter.list(dir);
+		} catch (e) {
+			c.fileFailed(dir, new Error(`Ordner kann nicht gelesen werden: ${(e as Error)?.message ?? e}`), "read", "folder", true);
+			this.holdFolder(dir, c);
+			return;
+		}
+		if (this.state.failures?.[dir]?.folder) c.tracker.succeed(dir);
 		for (const path of listing.files) {
-			if (excluded(path)) continue;
-			const st = await this.vault.adapter.stat(path);
+			if (c.excluded(path)) continue;
+			let st: { type: string; mtime: number; size: number } | null;
+			try {
+				st = await this.vault.adapter.stat(path);
+			} catch (e) {
+				c.fileFailed(path, new Error(`Datei kann nicht gelesen werden: ${(e as Error)?.message ?? e}`), "read", fingerprint(null, c.remoteMd5.get(path) ?? []));
+				c.tracker.held.add(path);
+				continue;
+			}
 			if (!st || st.type !== "file") continue;
+			c.localStat.set(path, { mtime: st.mtime, size: st.size });
+			const fp = fingerprint(st, c.remoteMd5.get(path) ?? []);
+			if (c.tracker.isHeld(path, fp)) continue;
 			let cached = this.state.cache[path];
 			if (!cached || cached.mtime !== st.mtime || cached.size !== st.size) {
-				const data = await this.vault.adapter.readBinary(path);
-				cached = { mtime: st.mtime, size: st.size, hash: md5(data) };
+				try {
+					const data = await this.vault.adapter.readBinary(path);
+					cached = { mtime: st.mtime, size: st.size, hash: md5(data) };
+				} catch (e) {
+					c.fileFailed(path, new Error(`Datei kann nicht gelesen werden: ${(e as Error)?.message ?? e}`), "read", fp);
+					c.tracker.held.add(path);
+					continue;
+				}
 				this.state.cache[path] = cached;
 			}
-			out.set(path, { path, hash: cached.hash, mtime: st.mtime });
+			c.out.set(path, { path, hash: cached.hash, mtime: st.mtime });
 		}
 		for (const folder of listing.folders) {
 			// Skip folders that can never contain synchronised files.
 			if (folder === normalizePath(this.baseDir).replace(/\/base$/, "")) continue;
-			await this.scanConfig(folder, excluded, out);
+			await this.scanConfig(folder, c);
+		}
+	}
+
+	/** Everything known below a held-back folder takes no part in this run. */
+	private holdFolder(dir: string, c: ScanContext) {
+		const prefix = dir + "/";
+		for (const p of [...c.remoteMd5.keys(), ...Object.keys(this.state.base), ...Object.keys(this.state.cache)]) {
+			if (p.startsWith(prefix)) c.tracker.held.add(p);
 		}
 	}
 

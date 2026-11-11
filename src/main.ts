@@ -17,6 +17,7 @@ import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { ConfigSyncOptions } from "./config";
 import { addEntry, formatEntry, logPath, makeLogMatcher } from "./log";
 import { Credentials, DriveClient, DriveError } from "./drive";
+import type { FailureEntry } from "./isolation";
 import { isSafeSyncPath } from "./paths";
 import { newInstallId, SecretStore } from "./secrets";
 import { MassDeleteError, SyncEngine, SyncResult, SyncState } from "./sync";
@@ -118,6 +119,11 @@ export default class DriveSyncPlugin extends Plugin {
 			callback: () => this.openLog(),
 		});
 		this.addCommand({
+			id: "show-failures",
+			name: "Dateien mit Sync-Fehlern anzeigen",
+			callback: () => this.showFailures(),
+		});
+		this.addCommand({
 			id: "show-conflicts",
 			name: "Notizen mit Sync-Konflikten anzeigen",
 			callback: () => this.showConflicts(),
@@ -210,7 +216,7 @@ export default class DriveSyncPlugin extends Plugin {
 			const result = await this.engine.run((msg) => {
 				this.statusEl.setText(`☁ ${msg}`);
 				progress?.setMessage(msg);
-			}, allowMassDelete);
+			}, allowMassDelete, manual);
 			this.lastSync = Date.now();
 			this.lastError = result.errors[0] ?? "";
 			if (!this.lastError) this.lastReported = "";
@@ -386,6 +392,22 @@ export default class DriveSyncPlugin extends Plugin {
 		if (f instanceof TFile) await this.app.workspace.getLeaf(false).openFile(f);
 	}
 
+	failureCount(): number {
+		return Object.keys(this.state.failures ?? {}).length;
+	}
+
+	showFailures() {
+		const entries = Object.entries(this.state.failures ?? {});
+		if (!entries.length) {
+			new Notice("Keine zurückgestellten Dateien ✓");
+			return;
+		}
+		new FailureListModal(this.app, entries, async (path) => {
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (f instanceof TFile) await this.app.workspace.getLeaf(false).openFile(f);
+		}, () => this.sync(true)).open();
+	}
+
 	async showConflicts() {
 		const files: TFile[] = [];
 		for (const f of this.app.vault.getMarkdownFiles()) {
@@ -429,10 +451,14 @@ export default class DriveSyncPlugin extends Plugin {
 			return;
 		}
 		const min = Math.floor((Date.now() - this.lastSync) / 60_000);
-		this.statusEl.setText(min < 1 ? "☁ ✓ gerade eben" : `☁ ✓ vor ${min} Min.`);
+		const failing = this.failureCount();
+		this.statusEl.setText(
+			(min < 1 ? "☁ ✓ gerade eben" : `☁ ✓ vor ${min} Min.`) + (failing ? ` · ⏸ ${failing}` : "")
+		);
 		this.statusEl.setAttr(
 			"aria-label",
-			`Klicken zum Synchronisieren · ${this.manifest.name} ${this.manifest.version}`
+			(failing ? `${failing} Datei(en) nach Fehler zurückgestellt – Befehl „Dateien mit Sync-Fehlern anzeigen“ · ` : "") +
+				`Klicken zum Synchronisieren (versucht auch zurückgestellte Dateien) · ${this.manifest.name} ${this.manifest.version}`
 		);
 	}
 
@@ -493,6 +519,7 @@ export default class DriveSyncPlugin extends Plugin {
 		if (!isRecord(this.state.cache)) this.state.cache = {};
 		if (typeof this.state.folderId !== "string") this.state.folderId = "";
 		if (typeof this.state.folderName !== "string") this.state.folderName = "";
+		if (!isRecord(this.state.failures)) this.state.failures = {};
 		if (inFile && this.secrets.available) await this.saveAll();
 	}
 
@@ -618,6 +645,36 @@ class ConfirmConnectModal extends Modal {
 	}
 	onClose() {
 		this.contentEl.empty();
+	}
+}
+
+class FailureListModal extends FuzzySuggestModal<[string, FailureEntry]> {
+	constructor(
+		app: App,
+		private entries: [string, FailureEntry][],
+		private open_: (path: string) => void,
+		private retry: () => void
+	) {
+		super(app);
+		this.setPlaceholder(
+			`${entries.length} zurückgestellte Datei(en) – auswählen zum Öffnen. Manuell synchronisieren versucht alle erneut.`
+		);
+		this.setInstructions([
+			{ command: "↵", purpose: "Datei öffnen" },
+			{ command: "Statusleiste", purpose: "klicken = alle jetzt erneut versuchen" },
+		]);
+	}
+	getItems() {
+		return this.entries;
+	}
+	getItemText([path, f]: [string, FailureEntry]) {
+		const next = new Date(f.nextTry);
+		const pad = (n: number) => String(n).padStart(2, "0");
+		const when = f.nextTry <= Date.now() ? "beim nächsten Lauf" : `ab ${pad(next.getHours())}:${pad(next.getMinutes())}`;
+		return `${path}${f.folder ? "/" : ""} — ${f.error} (${f.count}×, nächster Versuch ${when})`;
+	}
+	onChooseItem([path]: [string, FailureEntry]) {
+		this.open_(path);
 	}
 }
 

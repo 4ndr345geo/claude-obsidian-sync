@@ -119,6 +119,23 @@ die Zahlen und fragt nach Bestätigung.
 - Dateinamen und Fehlertexte von außen erscheinen im Sync-Protokoll als Code, damit darüber keine
   Links, Bilder oder HTML in die Notiz gelangen.
 
+**Fehler einer Datei bleiben bei dieser Datei** (`src/isolation.ts`). Kann eine Datei nicht
+gelesen, geschrieben oder übertragen werden (gesperrt, ungültiger Name, zu groß, keine
+Berechtigung …), wird sie **zurückgestellt**: Sie nimmt an dem Lauf gar nicht teil, wird also
+weder überschrieben noch gelöscht, und alle anderen Dateien werden normal synchronisiert.
+
+- Neuer Versuch nach 1 Min., 10 Min., 1 Std., danach alle 6 Std. Bei Fehlern, die nicht von
+  selbst verschwinden (zu groß, keine Berechtigung), gleich nach 6 Std.
+- **Sofort** neu versucht wird, wenn sich die Datei hier oder in Google Drive ändert, und bei
+  jeder **manuellen** Synchronisierung (Klick auf die Statusleiste).
+- Derselbe Fehler wird nur einmal gemeldet und protokolliert.
+- Ein nicht lesbarer Ordner in `.obsidian` (z. B. ein Plugin) wird als Ganzes zurückgestellt.
+- Die Statusleiste zeigt die Zahl der zurückgestellten Dateien (`⏸ 2`). Der Befehl **„Dateien mit
+  Sync-Fehlern anzeigen“** listet sie mit Grund und nächstem Versuch.
+
+Fehler, die alles betreffen (Anmeldung, keine Verbindung, Google gestört), brechen dagegen den
+ganzen Lauf ab, siehe Tabelle.
+
 **Antworten von Google werden einzeln ausgewertet** (`src/http.ts`):
 
 | Antwort | Bedeutung | Reaktion |
@@ -263,6 +280,7 @@ Aufbau:
 - `src/merge.ts`: 3-Wege-Merge mit Markdown-gerechter Markierung kritischer Stellen
 - `src/sync.ts`: führt den Plan aus
 - `src/drive.ts`: Google Drive API (v3)
+- `src/isolation.ts`: Zurückstellen einzelner Dateien nach Fehlern
 - `src/http.ts`: Auswertung der HTTP-Statuscodes (Wiederholen, Abbrechen, Meldung)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode
 - `src/config.ts`: welche Dateien aus `.obsidian` synchronisiert werden

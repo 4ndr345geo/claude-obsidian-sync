@@ -89,6 +89,7 @@ export function formatEntry(
 		["🔀", count("merged")],
 		["⚠", count("marked") + count("copy")],
 		["❌", count("error")],
+		["⏸", result?.held ?? 0],
 	]
 		.filter(([, n]) => n)
 		.map(([s, n]) => `${s} ${n}`);
@@ -105,6 +106,9 @@ export function formatEntry(
 	}
 	if (sorted.length > MAX_FILES_PER_ENTRY) lines.push(`- … und ${sorted.length - MAX_FILES_PER_ENTRY} weitere`);
 	if (result?.configChanged) lines.push("- ⚙ Einstellungen übernommen (Obsidian neu laden)");
+	if (result?.held) {
+		lines.push(`- ⏸ ${result.held} Datei(en) nach einem Fehler zurückgestellt, nächster Versuch automatisch (Befehl „Dateien mit Sync-Fehlern anzeigen“)`);
+	}
 	return lines.join("\n");
 }
 

@@ -17,12 +17,14 @@ test("Upload schlägt beim Markieren eines Konflikts fehl: Notiz wächst nicht b
   await a.sync();
   drive.failUpload = true;
   for (let i = 0; i < 3; i++) {
-    const r = await b.sync();
-    assert.equal(r.errors.length, 1);
+    // manuell = sofort erneut versuchen; derselbe Fehler wird nur einmal gemeldet
+    const r = await b.sync(false, true);
+    assert.equal(r.errors.length, i === 0 ? 1 : 0);
     assert.equal(b.vault.text("n.md"), "Anfang\n\nHandy\n\nEnde", "lokal unverändert, solange der Upload scheitert");
   }
+  assert.equal((await b.sync()).held, 1, "automatisch: zurückgestellt");
   drive.failUpload = false;
-  const r = await b.sync();
+  const r = await b.sync(false, true);
   assert.deepEqual(r.marked, ["n.md"]);
   const text = b.vault.text("n.md")!;
   assert.equal(text.split("[!warning] Sync-Konflikt").length - 1, 1, "genau eine Markierung");
@@ -39,9 +41,9 @@ test("Upload schlägt bei Bild-Konflikt fehl: es entsteht nur eine Konfliktkopie
   await a.sync();
   b.vault.set("bild.png", buf("vom Handy"));
   drive.failUpload = true;
-  for (let i = 0; i < 3; i++) await b.sync();
+  for (let i = 0; i < 3; i++) await b.sync(false, true);
   drive.failUpload = false;
-  await b.sync(); await a.sync(); await b.sync();
+  await b.sync(false, true); await a.sync(); await b.sync();
   const copies = [...b.vault.data.keys()].filter((p) => p.includes("Konflikt"));
   assert.equal(copies.length, 1, copies.join(", "));
   assert.deepEqual([...a.vault.data.keys()].sort(), [...b.vault.data.keys()].sort());
@@ -74,7 +76,7 @@ test("Beschädigter Download wird nicht in den Vault geschrieben", async () => {
   assert.equal(b.vault.text("n.md"), "Version 1");
   assert.equal(b.vault.text("neu.md"), undefined);
   drive.corruptDownload = false;
-  await b.sync();
+  await b.sync(false, true);
   assert.equal(b.vault.text("n.md"), "Version 2 mit mehr Text");
   assert.equal(b.vault.text("neu.md"), "ganz neue Notiz");
 });

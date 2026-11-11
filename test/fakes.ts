@@ -47,10 +47,18 @@ export class FakeVault {
     if (kids.length) { const f = new TFolder(); f.path = p; f.children = kids as never; return f; }
     return null;
   }
-  async readBinary(f: TFile) { return copy(this.data.get(f.path)!); }
+  /** Paths that cannot be read / written (simulates locked or broken files). */
+  unreadable = new Set<string>(); unwritable = new Set<string>();
+  async readBinary(f: TFile) {
+    if (this.unreadable.has(f.path)) throw new Error("EACCES: permission denied");
+    return copy(this.data.get(f.path)!);
+  }
   async read(f: TFile) { return dec.decode(this.data.get(f.path)!); }
-  async modifyBinary(f: TFile, d: ArrayBuffer) { this.set(f.path, d); }
-  async createBinary(p: string, d: ArrayBuffer) { if (this.nodes.has(p)) throw new Error("exists"); this.set(p, d); }
+  async modifyBinary(f: TFile, d: ArrayBuffer) { if (this.unwritable.has(f.path)) throw new Error("EBUSY: file is locked"); this.set(f.path, d); }
+  async createBinary(p: string, d: ArrayBuffer) {
+    if (this.unwritable.has(p)) throw new Error("EINVAL: invalid file name");
+    if (this.nodes.has(p)) throw new Error("exists"); this.set(p, d);
+  }
   async createFolder() {}
   async delete() {}
   set(p: string, d: ArrayBuffer) {
@@ -77,6 +85,7 @@ export class FakeVault {
     writeBinary: async (p: string, d: ArrayBuffer) => this.setHidden(p, copy(d)),
     read: async (p: string) => this.hiddenText(p)!,
     readBinary: async (p: string) => {
+      if (this.unreadable.has(p)) throw new Error("EACCES: permission denied");
       const e = this.hidden.get(p)!;
       return typeof e.data === "string" ? buf(e.data) : copy(e.data);
     },
@@ -88,6 +97,7 @@ export class FakeVault {
       return { type: "file", mtime: e.mtime, size, ctime: 0 };
     },
     list: async (dir: string) => {
+      if (this.unreadable.has(dir)) throw new Error("EACCES: permission denied");
       const files = new Set<string>(), folders = new Set<string>();
       for (const k of this.hidden.keys()) {
         if (!k.startsWith(dir + "/")) continue;
@@ -108,5 +118,5 @@ export function device(drive: FakeDrive, name: string, configEnabled = false) {
   const engine = new SyncEngine(app as never, drive as never, state,
     () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config }),
     ".obsidian/plugins/gdrive-vault-sync/base", async () => {});
-  return { vault, sync: (allowMassDelete = false) => engine.run(undefined, allowMassDelete), name, config };
+  return { vault, state, sync: (allowMassDelete = false, retryFailed = false) => engine.run(undefined, allowMassDelete, retryFailed), name, config };
 }
