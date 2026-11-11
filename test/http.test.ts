@@ -141,9 +141,11 @@ test("Anfrage: 401 holt genau einmal ein neues Zugriffstoken", async () => {
 });
 
 test("Anfrage: keine Verbindung und unlesbare Fehlerantwort", async () => {
-  const off = client([new Error("net::ERR_INTERNET_DISCONNECTED")]);
+  const net = () => new Error("net::ERR_INTERNET_DISCONNECTED");
+  const off = client([net(), net(), net()]);
   const e = await fails(off.drive.accountEmail());
-  assert.deepEqual([e.kind, e.status, e.offline], ["offline", 0, true]);
+  assert.deepEqual([e.kind, e.status, e.offline, e.network], ["offline", 0, true, true]);
+  assert.deepEqual(off.pauses, [1500, 4000], "zwei Wiederholungen für kurze Aussetzer");
   const html = client([{ status: 502, headers: {}, get json() { throw new SyntaxError("kein JSON"); } }, undefined]);
   assert.equal(await html.drive.accountEmail(), "ok@example.invalid", "502 ohne JSON wird trotzdem wiederholt");
 });

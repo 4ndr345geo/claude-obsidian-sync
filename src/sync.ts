@@ -276,6 +276,8 @@ export class SyncEngine {
 		let skippedUploads = 0;
 
 		const notTried = new Set<string>();
+		/** Files in a row whose transfer ran out of time – two in a row means: the connection is bad. */
+		let slowInARow: string[] = [];
 		for (const action of plan.actions) {
 			if (uploadsBlocked && (action.type === "upload" || action.type === "conflict")) {
 				skippedUploads++;
@@ -290,6 +292,7 @@ export class SyncEngine {
 				const before = snapshot(result);
 				try {
 					await this.execute(action, local, remoteById, result);
+					slowInARow = [];
 				} finally {
 					recordEvents(result, before, action.path, action.type === "deleteLocal");
 				}
@@ -308,6 +311,20 @@ export class SyncEngine {
 				}
 				// Everything else concerns only this file: hold it back, go on with the rest.
 				fileFailed(action.path, e, "other", fpOf(action.path));
+				if (e instanceof DriveError && e.network) {
+					slowInARow.push(action.path);
+					if (slowInARow.length >= 2) {
+						// Not the files, the connection: do not hold them back, stop the run.
+						for (const p of slowInARow) tracker.succeed(p);
+						await this.persist();
+						throw new DriveError(
+							"Die Verbindung zu Google ist zu langsam oder unterbrochen. Es wird später erneut versucht.",
+							0,
+							"timeout",
+							"sync"
+						);
+					}
+				} else slowInARow = [];
 			}
 			if (done % 25 === 0) await this.persist();
 		}
@@ -649,7 +666,7 @@ export class SyncEngine {
 
 	/** Downloads a file and makes sure it arrived completely and unchanged. */
 	private async downloadVerified(id: string, remote: RemoteEntry | undefined): Promise<ArrayBuffer> {
-		const data = await this.drive.download(id);
+		const data = await this.drive.download(id, remote?.size);
 		if (remote?.md5 && md5(data) !== remote.md5) {
 			throw new Error("Download unvollständig oder Datei gerade geändert – wird beim nächsten Mal erneut versucht.");
 		}

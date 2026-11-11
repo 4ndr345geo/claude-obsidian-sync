@@ -169,6 +169,24 @@ export default class DriveSyncPlugin extends Plugin {
 			if (this.settings.syncOnStartup) window.setTimeout(() => this.sync(false), 1500);
 		});
 
+		// Connection lost / back: show it at once, and catch up as soon as the device is online again.
+		let reconnect: number | null = null;
+		this.registerDomEvent(window, "offline", () => {
+			this.offline = true;
+			this.renderStatus();
+		});
+		this.registerDomEvent(window, "online", () => {
+			if (reconnect !== null) window.clearTimeout(reconnect);
+			// Wait a moment: right after "online" the connection is often not usable yet.
+			reconnect = window.setTimeout(() => {
+				reconnect = null;
+				if (this.offline || this.lastError) void this.sync(false);
+			}, 3000);
+		});
+		this.register(() => {
+			if (reconnect !== null) window.clearTimeout(reconnect);
+		});
+
 		// Phones/tablets: sync when the app comes back to the foreground.
 		this.registerDomEvent(document, "visibilitychange", () => {
 			if (document.visibilityState === "visible" && this.settings.syncOnResume) {
@@ -200,6 +218,13 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 		if (this.syncing) {
 			this.pending = true;
+			return;
+		}
+		// Known to be offline: automatic syncs do not even try (saves battery, no error).
+		// Local changes are not lost – the next sync finds them by their checksums.
+		if (!manual && typeof navigator !== "undefined" && navigator.onLine === false) {
+			this.offline = true;
+			this.renderStatus();
 			return;
 		}
 		// A stopped sync waits for the user; a manual sync checks again from scratch.
@@ -239,9 +264,10 @@ export default class DriveSyncPlugin extends Plugin {
 						0
 					);
 				}
-			} else if (e instanceof DriveError && e.offline && !manual) {
-				// No connection during an automatic sync is normal (plane, train):
-				// no message and no log entry, the next attempt follows by itself.
+			} else if (e instanceof DriveError && e.network && !manual) {
+				// No connection or a connection too slow during an automatic sync is
+				// normal (plane, train): no message and no log entry, the next attempt
+				// follows by itself – at the latest when the device is online again.
 				this.offline = true;
 				return;
 			} else {
@@ -438,7 +464,10 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 		if (this.offline) {
 			this.statusEl.setText("☁ offline");
-			this.statusEl.setAttr("aria-label", this.lastError);
+			this.statusEl.setAttr(
+				"aria-label",
+				`${this.lastError || "Keine Verbindung"} – Änderungen werden synchronisiert, sobald wieder eine Verbindung besteht.`
+			);
 			return;
 		}
 		if (this.lastError) {

@@ -119,6 +119,26 @@ die Zahlen und fragt nach Bestätigung.
 - Dateinamen und Fehlertexte von außen erscheinen im Sync-Protokoll als Code, damit darüber keine
   Links, Bilder oder HTML in die Notiz gelangen.
 
+**Schlechtes oder fehlendes Netz.**
+
+- **Offline arbeiten geht immer.** Änderungen werden erkannt, sobald wieder eine Verbindung
+  besteht (anhand der Prüfsummen, nicht anhand einer Warteschlange, die verloren gehen könnte).
+- Weiß das Gerät, dass es offline ist, versucht die automatische Synchronisierung es gar nicht
+  erst. Statusleiste: „☁ offline“. Kommt die Verbindung zurück, wird nach 3 Sekunden
+  synchronisiert.
+- **Kurze Aussetzer** (z. B. Wechsel WLAN → Mobilfunk) werden überbrückt: Jede Anfrage wird
+  nach 1,5 und 4 Sekunden noch einmal versucht.
+- **Zeitlimits:** Keine Anfrage kann die Synchronisierung blockieren. Abfragen dürfen 30 Sekunden
+  dauern, Übertragungen 1 Minute plus Zeit für die Datei bei 50 KB/s (höchstens 15 Minuten).
+- Läuft bei einer einzelnen Datei die Zeit ab, wird nur sie zurückgestellt. Passiert es bei zwei
+  Dateien hintereinander, liegt es an der Verbindung: Der Lauf wird ohne Meldung beendet und
+  später wiederholt.
+- **Große Dateien** (über 4 MB) werden in Teilen von 8 MB hochgeladen. Reißt die Verbindung ab,
+  fragt das Plugin bei Google nach, was angekommen ist, und macht dort weiter. Das gilt auch für
+  den nächsten Versuch, solange Obsidian nicht neu gestartet wurde.
+- Bricht ein Lauf mittendrin ab, geht nichts verloren: Der nächste Lauf vergleicht neu und
+  überträgt nur, was noch fehlt.
+
 **Fehler einer Datei bleiben bei dieser Datei** (`src/isolation.ts`). Kann eine Datei nicht
 gelesen, geschrieben oder übertragen werden (gesperrt, ungültiger Name, zu groß, keine
 Berechtigung …), wird sie **zurückgestellt**: Sie nimmt an dem Lauf gar nicht teil, wird also

@@ -1,7 +1,7 @@
 {
   "id": "gdrive-vault-sync",
   "name": "Google Drive Vault Sync",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "minAppVersion": "1.6.0",
   "description": "Synchronisiert den Vault über Google Drive auf allen Geräten – mit automatischem Zusammenführen von Änderungen.",
   "author": "4ndr345geo",

@@ -23,6 +23,8 @@ export interface RemoteEntry {
 	md5: string;
 	modifiedTime: number;
 	device?: string;
+	/** Size in bytes, if known (sets the time limit of the download) */
+	size?: number;
 }
 
 export interface BaseEntry {
