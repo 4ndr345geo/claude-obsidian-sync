@@ -71,8 +71,47 @@ function sleep(ms: number) {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
-function q(value: string) {
-	return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+/**
+ * Value inside a Drive search query ('...'). Control characters are removed,
+ * backslash and single quote are escaped – the value cannot end the string
+ * and add its own conditions.
+ */
+export function q(value: string) {
+	// eslint-disable-next-line no-control-regex
+	return value.replace(/[\u0000-\u001f\u007f]/g, "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+/** Google file ids: letters, digits, "-" and "_" only. Anything else is rejected. */
+const ID = /^[A-Za-z0-9_-]{1,200}$/;
+export function checkId(id: unknown): string {
+	if (typeof id !== "string" || !ID.test(id)) throw new DriveError("Ungültige Datei-ID von Google Drive.", 502, "unexpected", "file");
+	return id;
+}
+
+/** The only hosts that ever receive a request (and with it the access token). */
+const ALLOWED_HOSTS = new Set(["www.googleapis.com", "oauth2.googleapis.com"]);
+// eslint-disable-next-line no-control-regex
+const UNSAFE_HEADER = /[\r\n\u0000]/;
+
+/**
+ * Last check before anything leaves the device: HTTPS to Google only, and no
+ * line breaks in the address or in header values (HTTP header splitting).
+ */
+export function checkOutgoing(params: RequestUrlParam): void {
+	let url: URL;
+	try {
+		url = new URL(params.url);
+	} catch {
+		throw new DriveError("Ungültige Adresse.", 0, "badRequest", "file");
+	}
+	// eslint-disable-next-line no-control-regex
+	if (url.protocol !== "https:" || !ALLOWED_HOSTS.has(url.hostname) || url.username || url.password || /[\s\u0000-\u001f]/.test(params.url)) {
+		throw new DriveError(`Anfrage an ${url.hostname || "?"} blockiert: nur Google ist erlaubt.`, 0, "badRequest", "file");
+	}
+	const values = [params.contentType ?? "", params.method ?? "", ...Object.keys(params.headers ?? {}), ...Object.values(params.headers ?? {})];
+	if (values.some((v) => UNSAFE_HEADER.test(String(v)))) {
+		throw new DriveError("Anfrage blockiert: Zeilenumbruch in einem HTTP-Header.", 0, "badRequest", "file");
+	}
 }
 
 export class DriveClient {
@@ -120,6 +159,7 @@ export class DriveClient {
 	 * with status 0: kind "offline" (no connection) or "timeout" (no answer).
 	 */
 	private async send(params: RequestUrlParam, timeoutMs: number, scope: ErrorScope): Promise<RequestUrlResponse> {
+		checkOutgoing(params);
 		if (!this.online()) throw new DriveError("Keine Verbindung zu Google (Gerät ist offline).", 0, "offline");
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const timeout = new Promise<never>((_, reject) => {
@@ -195,7 +235,8 @@ export class DriveClient {
 		}
 		const json = safeJson(res);
 		const accessToken = json.access_token;
-		if (typeof accessToken !== "string" || !accessToken) {
+		// The token goes into a header: printable ASCII only, so it cannot split the header.
+		if (typeof accessToken !== "string" || !/^[\x21-\x7e]{1,4096}$/.test(accessToken)) {
 			throw new DriveError("Unerwartete Antwort von der Google-Anmeldung.", res.status, "unexpected");
 		}
 		this.accessToken = accessToken;
@@ -249,16 +290,14 @@ export class DriveClient {
 			url: `${API}/files?q=${encodeURIComponent(query)}&fields=files(id)&spaces=drive`,
 		});
 		const found = safeJson(res).files;
-		if (Array.isArray(found) && found.length && typeof found[0].id === "string") return found[0].id;
+		if (Array.isArray(found) && found.length) return checkId(found[0].id);
 		const created = await this.request({
 			url: `${API}/files?fields=id`,
 			method: "POST",
 			contentType: "application/json",
 			body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: ["root"] }),
 		});
-		const id = safeJson(created).id;
-		if (typeof id !== "string" || !id) throw new DriveError("Ordner konnte nicht angelegt werden.", 502);
-		return id;
+		return checkId(safeJson(created).id);
 	}
 
 	/**
@@ -275,6 +314,20 @@ export class DriveClient {
 			return f.id === folderId && f.trashed === false && f.mimeType === FOLDER_MIME;
 		} catch (e) {
 			if (e instanceof DriveError && e.kind === "notFound") return false;
+			throw e;
+		}
+	}
+
+	/** Current state of one file (for the check right before an upload or deletion). */
+	async getMeta(id: string): Promise<RemoteEntry | null> {
+		try {
+			const res = await this.request({
+				url: `${API}/files/${encodeURIComponent(checkId(id))}?fields=${encodeURIComponent(FILE_FIELDS + ",trashed")}`,
+			});
+			const f = safeJson(res);
+			return f.trashed ? null : toEntry(f);
+		} catch (e) {
+			if (e instanceof DriveError && e.kind === "notFound") return null;
 			throw e;
 		}
 	}
@@ -580,9 +633,10 @@ function toEntry(f: {
 	appProperties?: Record<string, string>;
 	size?: string;
 }): RemoteEntry {
-	if (!f || typeof f.id !== "string" || !f.id || typeof f.name !== "string") {
-		throw new DriveError("Unerwartete Antwort von Google Drive (Datei).", 502);
+	if (!f || typeof f.name !== "string") {
+		throw new DriveError("Unerwartete Antwort von Google Drive (Datei).", 502, "unexpected", "file");
 	}
+	checkId(f.id);
 	return {
 		id: f.id,
 		// The file name is the vault path. (Older versions also stored it in

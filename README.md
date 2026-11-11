@@ -98,6 +98,27 @@ Ordner (Name beginnt mit einem Punkt) außer dem Einstellungsordner, andere Schr
 Einstellungsordners (`.Obsidian`, `OBSIDI~1`) und Namen mit `:` oder Steuerzeichen. Der Ordner
 dieses Plugins wird nie überschrieben. Solche Dateien werden auch lokal nicht synchronisiert.
 
+**Anfragen an Google.** Werte in Suchanfragen an Google Drive werden maskiert (`'` und `\`),
+Steuerzeichen entfernt. Datei-IDs von Google müssen aus Buchstaben, Ziffern, `-` und `_`
+bestehen. Jede Anfrage wird vor dem Absenden geprüft: nur HTTPS, nur an `www.googleapis.com` und
+`oauth2.googleapis.com`, keine Zeilenumbrüche in Adresse oder Headern (Schutz vor HTTP-Header-
+Splitting). Das Zugriffstoken von Google wird nur verwendet, wenn es aus druckbaren ASCII-Zeichen
+besteht.
+
+**Gleichzeitige Änderungen (Optimistic Concurrency).** Unmittelbar bevor eine Datei in Google
+Drive überschrieben oder gelöscht wird, prüft das Plugin per MD5-Prüfsumme, ob dort noch die
+Version liegt, von der es ausgegangen ist. Hat ein anderes Gerät sie inzwischen geändert, wird
+nicht überschrieben, sondern mit der neuen Version zusammengeführt; gelöscht wird dann nicht.
+Google Drive bietet keine echte Sperre, ein Zeitfenster von Sekundenbruchteilen zwischen Prüfung
+und Upload bleibt.
+
+**Speicherschutz (Memory Guard).** Dateien über einer Größengrenze (Standard: 200 MB auf
+Handy/Tablet, 2000 MB am Computer, einstellbar) werden auf diesem Gerät weder gelesen noch
+heruntergeladen. Die Grenze wird anhand der Dateigröße geprüft, **bevor** etwas in den Speicher
+geladen wird. Solche Dateien werden auch nicht gelöscht und erscheinen unter „Dateien mit
+Sync-Fehlern anzeigen“. Notizen über 15 MB werden nie als Text zusammengeführt, sondern wie
+Bilder behandelt (beide Versionen bleiben).
+
 **Sicherheitsstopp bei Massenlöschung.** Würde eine Synchronisierung mindestens 20 Dateien und
 mindestens die Hälfte aller Dateien löschen (z. B. weil der Drive-Ordner geleert wurde oder der
 Vault nicht vollständig geladen ist), wird nichts geändert. Ein Klick auf die Statusleiste zeigt
@@ -281,7 +302,7 @@ bisherige Version gesichert, in
   Version wird auf die anderen Geräte übertragen.
 - Kann die Sicherung nicht geschrieben werden (z. B. Speicher voll), bleibt die Datei unverändert
   und wird zurückgestellt.
-- Aufbewahrung: 30 Tage, höchstens 300 MB (einstellbar). Dateien über einem Viertel davon
+- Aufbewahrung: 30 Tage, höchstens 300 MB (einstellbar) und höchstens 50 Versionen pro Datei. Dateien über einem Viertel davon
   (höchstens 50 MB) werden nicht gesichert; für sie hält Google Drive alte Versionen 30 Tage lang.
 - Die Sicherungen bleiben **nur auf diesem Gerät** und werden nicht synchronisiert. Sie sind
   unverschlüsselt und werden beim Deinstallieren des Plugins mit gelöscht. Sie ersetzen kein

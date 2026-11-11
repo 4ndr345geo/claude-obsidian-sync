@@ -3,7 +3,7 @@
  * the previous version is copied to
  *   .obsidian/plugins/gdrive-vault-sync/backups/<date>/<time>/<path in the vault>
  * One time folder per sync run. The folder is device-local (never synchronised)
- * and is cleaned up automatically (age and total size).
+ * and is cleaned up automatically (age, total size, versions per file).
  */
 
 export interface BackupOptions {
@@ -14,6 +14,8 @@ export interface BackupOptions {
 	maxTotalBytes: number;
 	/** Larger files are not backed up (Google Drive keeps their old versions for 30 days) */
 	maxFileBytes: number;
+	/** At most this many versions per file; older ones are removed */
+	maxVersionsPerFile?: number;
 }
 
 export interface BackupEntry {
@@ -35,6 +37,7 @@ export interface BackupAdapter {
 	list(path: string): Promise<{ files: string[]; folders: string[] }>;
 	stat(path: string): Promise<{ type: string; size: number; mtime: number } | null>;
 	rmdir(path: string, recursive: boolean): Promise<void>;
+	remove(path: string): Promise<void>;
 }
 
 const pad = (n: number, l = 2) => String(n).padStart(l, "0");
@@ -143,6 +146,14 @@ export class BackupStore {
 	async prune(now = Date.now()): Promise<number> {
 		if (!(await this.adapter.exists(this.dir))) return 0;
 		const o = this.options();
+		// 1) Per file: keep only the newest versions.
+		const perFile = o.maxVersionsPerFile ?? 50;
+		const seen = new Map<string, number>();
+		for (const e of await this.list()) {
+			const n = (seen.get(e.original) ?? 0) + 1;
+			seen.set(e.original, n);
+			if (n > perFile) await this.adapter.remove(e.backupPath);
+		}
 		const runs: { dir: string; time: number; size: number }[] = [];
 		const current = this.run ? `${this.dir}/${this.run.day}/${this.run.time}` : "";
 		for (const dayDir of (await this.adapter.list(this.dir)).folders) {
@@ -153,8 +164,15 @@ export class BackupStore {
 				continue;
 			}
 			for (const timeDir of timeDirs) {
-				let size = 0;
-				await this.walk(timeDir, async (f) => void (size += (await this.adapter.stat(f))?.size ?? 0));
+				let size = 0, files = 0;
+				await this.walk(timeDir, async (f) => {
+					size += (await this.adapter.stat(f))?.size ?? 0;
+					files++;
+				});
+				if (!files && timeDir !== current) {
+					await this.adapter.rmdir(timeDir, true);
+					continue;
+				}
 				runs.push({ dir: timeDir, time: parseStamp(base(dayDir), base(timeDir)), size });
 			}
 		}

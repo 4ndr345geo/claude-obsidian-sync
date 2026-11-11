@@ -28,6 +28,22 @@ export interface SyncSettingsView {
 	backup: BackupOptions;
 	/** Files whose previous version is not worth a backup (e.g. the sync logs) */
 	skipBackup?: (path: string) => boolean;
+	/** Larger files are not synchronised on this device (memory guard, see MAX_TEXT_BYTES too) */
+	maxFileBytes?: number;
+}
+
+/**
+ * Memory guard: notes larger than this are never decoded and merged as text
+ * (that needs several times their size in memory and can crash the app on a
+ * phone). They are handled like images: both versions are kept.
+ */
+export const MAX_TEXT_BYTES = 15 * 1024 * 1024;
+
+/** The file in Google Drive changed after the list was read – it must not be overwritten blindly. */
+export class ConcurrentChange extends Error {
+	constructor(public path: string, public current: RemoteEntry | null) {
+		super("Die Datei wurde gerade auf einem anderen Gerät geändert.");
+	}
 }
 
 export type SyncEventKind =
@@ -86,7 +102,9 @@ interface ScanContext {
 	tracker: FailureTracker;
 	localStat: Map<string, { mtime: number; size: number }>;
 	remoteMd5: Map<string, string[]>;
-	fileFailed: (path: string, e: unknown, kind: "read", fp: string, folder?: boolean) => void;
+	fileFailed: (path: string, e: unknown, kind: "read" | "tooLarge", fp: string, folder?: boolean) => void;
+	/** Memory guard: true (and the file is held back) if it is too large for this device */
+	tooLarge: (path: string, bytes: number | undefined, fp: string) => boolean;
 	out: Map<string, LocalEntry>;
 }
 
@@ -198,7 +216,7 @@ export class SyncEngine {
 		this.state.failures ??= {};
 		const tracker = new FailureTracker(this.state.failures, retryFailed);
 		/** Reports a failure of one file; a problem that just repeats itself is not reported again. */
-		const fileFailed = (path: string, e: unknown, kind: Parameters<FailureTracker["fail"]>[2], fp: string, folder = false) => {
+		const fileFailed = (path: string, e: unknown, kind: Parameters<FailureTracker["fail"]>[2], fp: string, folder = false): void => {
 			const msg = (e as Error)?.message ?? String(e);
 			const k = e instanceof DriveError ? e.kind : kind;
 			if (tracker.fail(path, msg, k, fp, folder)) {
@@ -251,7 +269,16 @@ export class SyncEngine {
 		const fpOf = (path: string) => fingerprint(localStat.get(path) ?? null, remoteMd5.get(path) ?? []);
 
 		onProgress?.("Prüfe lokale Dateien …");
-		const scan: ScanContext = { excluded, tracker, localStat, remoteMd5, fileFailed, out: new Map() };
+		const limit = s.maxFileBytes ?? Infinity;
+		const mb = (n: number) => `${Math.round(n / 1024 / 1024)} MB`;
+		const tooLarge = (path: string, bytes: number | undefined, fp: string) => {
+			if (bytes === undefined || bytes <= limit) return false;
+			// Checked before the file is read into memory.
+			fileFailed(path, new Error(`Zu groß für dieses Gerät (${mb(bytes)}, Grenze ${mb(limit)}) – wird hier nicht synchronisiert.`), "tooLarge", fp);
+			tracker.held.add(path);
+			return true;
+		};
+		const scan: ScanContext = { excluded, tracker, localStat, remoteMd5, fileFailed, tooLarge, out: new Map() };
 		await this.scanLocal(scan);
 		if (s.config.enabled) await this.scanConfig(this.vault.configDir, scan);
 		const local = scan.out;
@@ -260,6 +287,10 @@ export class SyncEngine {
 		// in this run at all: not here, not in Drive, not in the base. So they can
 		// neither be overwritten nor be mistaken for deleted.
 		for (const path of remoteMd5.keys()) tracker.isHeld(path, fpOf(path));
+		// Memory guard for files that only this device would have to download.
+		for (const r of remoteFiltered) {
+			if (!tracker.held.has(r.path) && !local.has(r.path) && !localStat.has(r.path)) tooLarge(r.path, r.size, fpOf(r.path));
+		}
 		for (const path of Object.keys(this.state.base)) {
 			if (!local.has(path) && !remoteMd5.has(path)) continue;
 			tracker.isHeld(path, fpOf(path));
@@ -411,6 +442,7 @@ export class SyncEngine {
 			c.localStat.set(file.path, { mtime, size });
 			const fp = fingerprint({ mtime, size }, c.remoteMd5.get(file.path) ?? []);
 			if (c.tracker.isHeld(file.path, fp)) continue;
+			if (c.tooLarge(file.path, size, fp)) continue;
 			let cached = this.state.cache[file.path];
 			if (!cached || cached.mtime !== mtime || cached.size !== size) {
 				try {
@@ -461,6 +493,7 @@ export class SyncEngine {
 			c.localStat.set(path, { mtime: st.mtime, size: st.size });
 			const fp = fingerprint(st, c.remoteMd5.get(path) ?? []);
 			if (c.tracker.isHeld(path, fp)) continue;
+			if (c.tooLarge(path, st.size, fp)) continue;
 			let cached = this.state.cache[path];
 			if (!cached || cached.mtime !== st.mtime || cached.size !== st.size) {
 				try {
@@ -517,7 +550,8 @@ export class SyncEngine {
 	}
 
 	/** Base copies are kept for notes (line merge) and settings files (JSON merge). */
-	private keepsBaseText(path: string) {
+	private keepsBaseText(path: string, bytes = 0) {
+		if (bytes > MAX_TEXT_BYTES) return false; // never merged as text, no copy needed
 		return isMergeable(path) || (this.isConfig(path) && path.endsWith(".json"));
 	}
 
@@ -530,7 +564,7 @@ export class SyncEngine {
 		switch (a.type) {
 			case "setBase": {
 				this.state.base[a.path] = { hash: a.hash, remoteId: a.remoteId };
-				if (this.keepsBaseText(a.path)) {
+				if (this.keepsBaseText(a.path, local.get(a.path) ? this.state.cache[a.path]?.size ?? 0 : 0)) {
 					const data = await this.readLocal(a.path);
 					if (data) await this.writeBaseText(a.path, new TextDecoder().decode(data));
 				}
@@ -539,10 +573,18 @@ export class SyncEngine {
 			case "dropBase":
 				await this.forget(a.path);
 				return;
-			case "upload":
-				await this.uploadPath(a.path, a.remoteId);
-				r.uploaded++;
+			case "upload": {
+				// Optimistic concurrency: overwrite only the version the plan was made for.
+				const expected = a.remoteId ? remoteById.get(a.remoteId)?.md5 : undefined;
+				try {
+					await this.uploadPath(a.path, a.remoteId, expected);
+					r.uploaded++;
+				} catch (e) {
+					if (!(e instanceof ConcurrentChange) || !a.remoteId) throw e;
+					await this.resolveConcurrent(a.path, a.remoteId, e.current, r);
+				}
 				return;
+			}
 			case "download": {
 				if (!(await this.unchangedSinceScan(a.path, local))) return; // edited right now -> next round
 				const data = await this.downloadVerified(a.remoteId, remoteById.get(a.remoteId));
@@ -570,20 +612,60 @@ export class SyncEngine {
 				r.deleted++;
 				return;
 			}
-			case "deleteRemote":
-				await this.drive.trash(a.remoteId);
+			case "deleteRemote": {
+				// Deleted here – but if another device has just changed the file, keep it
+				// (the next run downloads the new version).
+				const now = await this.drive.getMeta(a.remoteId);
+				const planned = remoteById.get(a.remoteId)?.md5;
+				if (now && planned && now.md5 !== planned) return;
+				if (now) await this.drive.trash(a.remoteId);
 				await this.forget(a.path);
 				r.deleted++;
 				return;
+			}
 			case "conflict":
 				if (!(await this.unchangedSinceScan(a.path, local))) return;
-				if (this.isConfig(a.path)) {
-					await this.resolveConfigConflict(a.path, a.remoteId, a.hasBase, remoteById.get(a.remoteId), r);
-					return;
+				try {
+					if (this.isConfig(a.path)) {
+						await this.resolveConfigConflict(a.path, a.remoteId, a.hasBase, remoteById.get(a.remoteId), r);
+					} else {
+						await this.resolveConflict(a.path, a.remoteId, a.hasBase, remoteById.get(a.remoteId), r);
+					}
+				} catch (e) {
+					if (!(e instanceof ConcurrentChange)) throw e;
+					await this.resolveConcurrent(a.path, a.remoteId, e.current, r);
 				}
-				await this.resolveConflict(a.path, a.remoteId, a.hasBase, remoteById.get(a.remoteId), r);
 				return;
 		}
+	}
+
+	/**
+	 * Another device uploaded a new version while this device was about to
+	 * upload: merge with that new version instead of overwriting it.
+	 */
+	private async resolveConcurrent(path: string, remoteId: string, current: RemoteEntry | null, r: SyncResult) {
+		for (let attempt = 0; attempt < 3; attempt++) {
+			if (!current) {
+				// Deleted on the other device in the meantime: plan again in the next run.
+				return;
+			}
+			try {
+				if (this.isConfig(path)) await this.resolveConfigConflict(path, remoteId, true, current, r);
+				else await this.resolveConflict(path, remoteId, true, current, r);
+				return;
+			} catch (e) {
+				if (!(e instanceof ConcurrentChange)) throw e;
+				current = e.current;
+			}
+		}
+		throw new DriveError("Die Datei wird gerade auf einem anderen Gerät laufend geändert. Neuer Versuch später.", 409, "conflict", "file");
+	}
+
+	/** Throws ConcurrentChange if the file in Drive is no longer the expected version. */
+	private async expectRemote(path: string, remoteId: string, expectedMd5: string | undefined) {
+		if (!expectedMd5) return;
+		const now = await this.drive.getMeta(remoteId);
+		if (!now || now.md5 !== expectedMd5) throw new ConcurrentChange(path, now);
 	}
 
 	private async resolveConflict(
@@ -602,7 +684,8 @@ export class SyncEngine {
 		//    critical ones are marked directly in the note.
 		// Fallback: a note that is not valid UTF-8 text, or a merge that fails,
 		// is handled like an image – both versions are kept, nothing is mangled.
-		const texts = isMergeable(path) ? decodeStrict(localData, remoteData) : null;
+		const small = localData.byteLength <= MAX_TEXT_BYTES && remoteData.byteLength <= MAX_TEXT_BYTES;
+		const texts = isMergeable(path) && small ? decodeStrict(localData, remoteData) : null;
 		let m: ReturnType<typeof mergeText> | null = null;
 		if (texts) {
 			try {
@@ -620,6 +703,7 @@ export class SyncEngine {
 		if (texts && m) {
 			const localText = texts[0];
 			const merged = new TextEncoder().encode(m.text).buffer as ArrayBuffer;
+			await this.expectRemote(path, remoteId, md5(remoteData));
 			// Upload first. If it fails, nothing has changed on this device, and the
 			// next sync starts from the same state (otherwise the conflict marking
 			// would be merged again and again and the note would keep growing).
@@ -638,7 +722,9 @@ export class SyncEngine {
 			return;
 		}
 		if (isMergeable(path)) {
-			console.warn(`[Google Drive Sync] ${path}: kein gültiger UTF-8-Text oder nicht zusammenführbar – Konfliktkopie`);
+			console.warn(
+				`[Google Drive Sync] ${path}: ${small ? "kein gültiger UTF-8-Text oder nicht zusammenführbar" : "zu groß zum Zusammenführen"} – Konfliktkopie`
+			);
 		}
 
 		// 2) Binary files (images, PDFs …) cannot be merged:
@@ -650,7 +736,7 @@ export class SyncEngine {
 		// A copy that could not be uploaded is simply a new file for the next sync.
 		if (localWins) {
 			const copy = this.freePath(conflictPath(path, remote?.device ?? "anderes Gerät"));
-			await this.uploadData(path, localData, remoteId);
+			await this.uploadData(path, localData, remoteId, md5(remoteData));
 			await this.writeLocal(copy, remoteData);
 			r.conflicts.push(copy);
 			await this.uploadPath(copy);
@@ -683,7 +769,7 @@ export class SyncEngine {
 		const localNewer = st.mtime >= (remote?.modifiedTime ?? 0);
 
 		let result: ArrayBuffer = localNewer ? localData : remoteData;
-		if (path.endsWith(".json")) {
+		if (path.endsWith(".json") && localData.byteLength <= MAX_TEXT_BYTES && remoteData.byteLength <= MAX_TEXT_BYTES) {
 			const dec = new TextDecoder();
 			const merged = mergeJson(
 				dec.decode(localData),
@@ -693,6 +779,7 @@ export class SyncEngine {
 			);
 			if (merged !== null) result = new TextEncoder().encode(merged).buffer as ArrayBuffer;
 		}
+		await this.expectRemote(path, remoteId, md5(remoteData));
 		if (md5(result) !== md5(localData)) {
 			await this.writeLocal(path, result);
 			r.configChanged = true;
@@ -727,13 +814,19 @@ export class SyncEngine {
 		return data;
 	}
 
-	private async uploadPath(path: string, remoteId?: string): Promise<void> {
+	private async uploadPath(path: string, remoteId?: string, expectedMd5?: string): Promise<void> {
 		const data = await this.readLocal(path);
 		if (!data) return;
-		await this.uploadData(path, data, remoteId);
+		await this.uploadData(path, data, remoteId, expectedMd5);
 	}
 
-	private async uploadData(path: string, data: ArrayBuffer, remoteId?: string): Promise<void> {
+	/**
+	 * @param expectedMd5 optimistic concurrency: the version in Drive that may be
+	 *                    replaced. If Drive holds something else now, nothing is
+	 *                    uploaded and ConcurrentChange is thrown.
+	 */
+	private async uploadData(path: string, data: ArrayBuffer, remoteId?: string, expectedMd5?: string): Promise<void> {
+		if (remoteId) await this.expectRemote(path, remoteId, expectedMd5);
 		const st = await this.statLocal(path);
 		const entry = await this.drive.upload(
 			this.state.folderId,
@@ -753,7 +846,7 @@ export class SyncEngine {
 		if (st) {
 			this.state.cache[path] = { mtime: st.mtime, size: st.size, hash };
 		}
-		if (this.keepsBaseText(path)) {
+		if (this.keepsBaseText(path, data.byteLength)) {
 			await this.writeBaseText(path, new TextDecoder().decode(data));
 		}
 	}

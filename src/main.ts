@@ -43,6 +43,8 @@ interface Settings {
 	backupEnabled: boolean;
 	backupKeepDays: number;
 	backupMaxMB: number;
+	/** Memory guard: larger files are not synchronised on this device */
+	maxFileMB: number;
 }
 
 interface PluginData {
@@ -109,7 +111,9 @@ export default class DriveSyncPlugin extends Plugin {
 					keepDays: this.settings.backupKeepDays,
 					maxTotalBytes: this.settings.backupMaxMB * 1024 * 1024,
 					maxFileBytes: Math.min(50, this.settings.backupMaxMB / 4) * 1024 * 1024,
+					maxVersionsPerFile: 50,
 				},
+				maxFileBytes: this.settings.maxFileMB * 1024 * 1024,
 				// The logs of other devices change all the time; their old versions are not worth keeping.
 				skipBackup: (p) => this.isLogFile(p),
 			}),
@@ -576,6 +580,8 @@ export default class DriveSyncPlugin extends Plugin {
 				backupEnabled: true,
 				backupKeepDays: 30,
 				backupMaxMB: 300,
+				// Phones and tablets have far less memory than computers.
+				maxFileMB: Platform.isMobile ? 200 : 2000,
 				config: { enabled: false, settings: true, appearance: true, plugins: true },
 		};
 		this.settings = Object.assign({}, defaults, data.settings);
@@ -585,6 +591,8 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 		if (!isRecord(this.settings.config)) this.settings.config = defaults.config;
 		if (!(this.settings.backupKeepDays >= 1 && this.settings.backupKeepDays <= 365)) this.settings.backupKeepDays = 30;
+		if (!(this.settings.maxFileMB >= 10 && this.settings.maxFileMB <= 10000)) this.settings.maxFileMB = defaults.maxFileMB;
+		this.settings.folderName = cleanFolderName(this.settings.folderName) || defaults.folderName;
 		if (!(this.settings.backupMaxMB >= 20 && this.settings.backupMaxMB <= 5000)) this.settings.backupMaxMB = 300;
 		if (!(this.settings.autoSyncMinutes >= 0 && this.settings.autoSyncMinutes <= 30)) this.settings.autoSyncMinutes = 2;
 		if (!isSafeSyncPath(this.settings.logFolder.replace(/^\/+|\/+$/g, ""), this.app.vault.configDir)) {
@@ -646,6 +654,12 @@ export default class DriveSyncPlugin extends Plugin {
 }
 
 const LINK_ACTION = "gdrive-vault-sync";
+
+/** Folder name in Google Drive: no control characters, sensible length. */
+function cleanFolderName(v: unknown): string {
+	// eslint-disable-next-line no-control-regex
+	return typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 200) : "";
+}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -944,7 +958,7 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			.setDesc("Muss auf allen Geräten gleich sein.")
 			.addText((t) =>
 				t.setValue(s.folderName).onChange(async (v) => {
-					s.folderName = v.trim() || s.folderName;
+					s.folderName = cleanFolderName(v) || s.folderName;
 					await p.saveAll();
 				})
 			);
@@ -1089,6 +1103,22 @@ class DriveSyncSettingTab extends PluginSettingTab {
 		}
 
 		containerEl.createEl("h3", { text: "Erweitert" });
+		new Setting(containerEl)
+			.setName("Größte Datei, die auf diesem Gerät synchronisiert wird (MB)")
+			.setDesc(
+				"Schutz vor Speichermangel: Größere Dateien werden hier weder gelesen noch heruntergeladen und nicht gelöscht. " +
+					"Notizen über 15 MB werden nie als Text zusammengeführt. Standard: 200 MB auf Handy/Tablet, 2000 MB am Computer."
+			)
+			.addSlider((sl) =>
+				sl
+					.setLimits(10, 2000, 10)
+					.setValue(Math.min(s.maxFileMB, 2000))
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						s.maxFileMB = v;
+						await p.saveAll();
+					})
+			);
 		new Setting(containerEl)
 			.setName("Ausschließen")
 			.setDesc(

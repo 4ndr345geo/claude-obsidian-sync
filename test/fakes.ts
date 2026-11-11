@@ -18,7 +18,7 @@ export class FakeDrive {
   async folderUsable() { return !this.folderGone; }
   async listFiles(): Promise<RemoteEntry[]> {
     return [...this.files.entries()].filter(([, f]) => !f.trashed).map(([id, f]) => ({
-      id, path: f.path, md5: SparkMD5.ArrayBuffer.hash(f.data), modifiedTime: f.modifiedTime, device: f.device }));
+      id, path: f.path, md5: SparkMD5.ArrayBuffer.hash(f.data), modifiedTime: f.modifiedTime, device: f.device, size: f.data.byteLength }));
   }
   async download(id: string) {
     const d = copy(this.files.get(id)!.data);
@@ -26,12 +26,20 @@ export class FakeDrive {
   }
   async upload(_f: string, path: string, data: ArrayBuffer, device: string, id?: string, mtime?: number): Promise<RemoteEntry> {
     if (this.failUpload) throw new Error("Upload fehlgeschlagen");
+    const hook = this.beforeUpload; this.beforeUpload = null; hook?.();
     id = id ?? `id${++this.n}`;
     const modifiedTime = mtime ?? tick();
     this.files.set(id, { path, data: copy(data), modifiedTime, device, trashed: false });
     return { id, path, md5: SparkMD5.ArrayBuffer.hash(data), modifiedTime, device };
   }
   async trash(id: string) { this.files.get(id)!.trashed = true; }
+  /** Test hook: runs once before the next upload (e.g. another device writing in between). */
+  beforeUpload: (() => void) | null = null;
+  async getMeta(id: string): Promise<RemoteEntry | null> {
+    const f = this.files.get(id);
+    if (!f || f.trashed) return null;
+    return { id, path: f.path, md5: SparkMD5.ArrayBuffer.hash(f.data), modifiedTime: f.modifiedTime, device: f.device, size: f.data.byteLength };
+  }
 }
 
 export class FakeVault {
@@ -90,6 +98,7 @@ export class FakeVault {
       return typeof e.data === "string" ? buf(e.data) : copy(e.data);
     },
     remove: async (p: string) => void this.hidden.delete(p),
+    copy: async (a: string, b: string) => { const e = this.hidden.get(a); if (e) this.hidden.set(b, { ...e }); },
     stat: async (p: string) => {
       const e = this.hidden.get(p);
       if (!e) return null;
@@ -115,9 +124,10 @@ export function device(drive: FakeDrive, name: string, configEnabled = false) {
   const state: SyncState = { base: {}, cache: {}, folderId: "", folderName: "" };
   const app = { vault, fileManager: { trashFile: async (f: { path: string }) => vault.remove(f.path) } };
   const config = { enabled: configEnabled, settings: true, appearance: true, plugins: true };
+  const limits = { maxFileBytes: undefined as number | undefined };
   const backup = { enabled: true, keepDays: 30, maxTotalBytes: 100 * 1024 * 1024, maxFileBytes: 10 * 1024 * 1024 };
   const engine = new SyncEngine(app as never, drive as never, state,
-    () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config, backup }),
+    () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config, backup, maxFileBytes: limits.maxFileBytes }),
     ".obsidian/plugins/gdrive-vault-sync/base", async () => {});
-  return { vault, state, engine, backup, sync: (allowMassDelete = false, retryFailed = false) => engine.run(undefined, allowMassDelete, retryFailed), name, config };
+  return { vault, state, engine, backup, limits, sync: (allowMassDelete = false, retryFailed = false) => engine.run(undefined, allowMassDelete, retryFailed), name, config };
 }
