@@ -15,7 +15,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Version lesen und prüfen, ob es schon ein Release gibt
         id: version
@@ -23,6 +25,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="$(node -p "require('./manifest.json').version")"
+          # Die Version landet in Shell-Befehlen und im Tag: nur x.y.z zulassen.
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Ungültige Version in manifest.json"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if gh release view "$VERSION" >/dev/null 2>&1; then
             echo "Release $VERSION existiert bereits – nichts zu tun."
@@ -31,7 +35,7 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.version.outputs.exists == 'false'
         with:
           node-version: 22
@@ -43,10 +47,11 @@ jobs:
 
       - name: Versionen müssen übereinstimmen
         if: steps.version.outputs.exists == 'false'
+        env:
+          V: ${{ steps.version.outputs.version }}
         run: |
-          V="${{ steps.version.outputs.version }}"
           P="$(node -p "require('./package.json').version")"
-          node -e "if(!require('./versions.json')['$V']) process.exit(1)" \
+          node -e "if(!require('./versions.json')[process.env.V]) process.exit(1)" \
             || { echo "::error::Version $V fehlt in versions.json"; exit 1; }
           [ "$P" = "$V" ] || { echo "::error::package.json ($P) und manifest.json ($V) unterscheiden sich"; exit 1; }
 
@@ -62,8 +67,8 @@ jobs:
         if: steps.version.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
         run: |
-          V="${{ steps.version.outputs.version }}"
           gh release create "$V" main.js manifest.json \
             --target "$GITHUB_SHA" \
             --title "$V" \

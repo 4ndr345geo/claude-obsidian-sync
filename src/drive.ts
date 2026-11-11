@@ -1,4 +1,5 @@
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
+import { cleanDeviceName } from "./paths";
 import type { RemoteEntry } from "./plan";
 
 const API = "https://www.googleapis.com/drive/v3";
@@ -56,8 +57,12 @@ export class DriveClient {
 				res.status
 			);
 		}
-		this.accessToken = res.json.access_token;
-		this.expiresAt = Date.now() + res.json.expires_in * 1000;
+		const accessToken = res.json?.access_token;
+		if (typeof accessToken !== "string" || !accessToken) {
+			throw new DriveError("Unerwartete Antwort von der Google-Anmeldung.", 502);
+		}
+		this.accessToken = accessToken;
+		this.expiresAt = Date.now() + (Number(res.json.expires_in) || 3600) * 1000;
 		return this.accessToken;
 	}
 
@@ -113,7 +118,7 @@ export class DriveClient {
 
 	async listFiles(folderId: string): Promise<RemoteEntry[]> {
 		const out: RemoteEntry[] = [];
-		const query = `'${folderId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`;
+		const query = `'${q(folderId)}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`;
 		let pageToken = "";
 		do {
 			const url =
@@ -130,7 +135,7 @@ export class DriveClient {
 	}
 
 	async download(id: string): Promise<ArrayBuffer> {
-		const res = await this.request({ url: `${API}/files/${id}?alt=media` });
+		const res = await this.request({ url: `${API}/files/${encodeURIComponent(id)}?alt=media` });
 		return res.arrayBuffer;
 	}
 
@@ -146,10 +151,12 @@ export class DriveClient {
 		const metadata = buildMetadata(folderId, path, device, id, mtime);
 		const fields = `fields=${encodeURIComponent(FILE_FIELDS)}`;
 		const method = id ? "PATCH" : "POST";
-		const base = id ? `${UPLOAD}/files/${id}` : `${UPLOAD}/files`;
+		const base = id ? `${UPLOAD}/files/${encodeURIComponent(id)}` : `${UPLOAD}/files`;
 
 		if (data.byteLength <= MULTIPART_LIMIT) {
-			const boundary = "obsidian-drive-sync-" + Math.random().toString(36).slice(2);
+			const boundary =
+				"obsidian-drive-sync-" +
+				Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 			const body = buildMultipart(boundary, metadata, data);
 			const res = await this.request({
 				url: `${base}?uploadType=multipart&${fields}`,
@@ -168,7 +175,10 @@ export class DriveClient {
 			body: JSON.stringify(metadata),
 		});
 		const location = init.headers["location"] ?? init.headers["Location"];
-		if (!location) throw new DriveError("Upload-Sitzung konnte nicht gestartet werden.", 500);
+		// The access token is sent to this address, so it has to be Google's.
+		if (!location || !location.startsWith(UPLOAD + "/")) {
+			throw new DriveError("Upload-Sitzung konnte nicht gestartet werden.", 500);
+		}
 		const res = await this.request({ url: location, method: "PUT", body: data });
 		return toEntry(res.json);
 	}
@@ -176,7 +186,7 @@ export class DriveClient {
 	/** Moves a file to the Google Drive trash (recoverable for 30 days). */
 	async trash(id: string): Promise<void> {
 		await this.request({
-			url: `${API}/files/${id}`,
+			url: `${API}/files/${encodeURIComponent(id)}`,
 			method: "PATCH",
 			contentType: "application/json",
 			body: JSON.stringify({ trashed: true }),
@@ -235,7 +245,7 @@ function toEntry(f: {
 		path: f.name,
 		md5: f.md5Checksum ?? "",
 		modifiedTime: f.modifiedTime ? Date.parse(f.modifiedTime) : 0,
-		device: f.appProperties?.device,
+		device: cleanDeviceName(f.appProperties?.device),
 	};
 }
 

@@ -1,3 +1,5 @@
+import { canonicalSegment } from "./paths";
+
 /**
  * Which files inside the Obsidian settings folder (.obsidian) are synchronised.
  */
@@ -14,7 +16,7 @@ export interface ConfigSyncOptions {
 
 /** Device-specific files that are never synchronised. */
 const NEVER = new Set(["workspace.json", "workspace-mobile.json", "workspaces.json"]);
-const NEVER_SEGMENTS = new Set([".git", "node_modules", ".DS_Store", "Thumbs.db", ".hotreload"]);
+const NEVER_SEGMENTS_CANON = new Set([".git", "node_modules", ".ds_store", "thumbs.db", ".hotreload"]);
 
 /**
  * @param configDir  usually ".obsidian"
@@ -22,18 +24,21 @@ const NEVER_SEGMENTS = new Set([".git", "node_modules", ".DS_Store", "Thumbs.db"
  */
 export function makeConfigFilter(configDir: string, ownPluginId: string, o: ConfigSyncOptions) {
 	const prefix = configDir + "/";
+	const own = canonicalSegment(ownPluginId);
 	return (path: string): boolean => {
 		if (!o.enabled || !path.startsWith(prefix)) return false;
 		const rel = path.slice(prefix.length);
-		const parts = rel.split("/");
-		if (parts.some((p) => NEVER_SEGMENTS.has(p))) return false;
+		// Compare the way a case-insensitive file system would, so that e.g.
+		// "Plugins/GDrive-Vault-Sync" cannot be used to reach this plugin's folder.
+		const parts = rel.split("/").map(canonicalSegment);
+		if (parts.some((p) => !p || NEVER_SEGMENTS_CANON.has(p))) return false;
 		if (parts.length === 1) {
-			if (NEVER.has(rel) || !rel.endsWith(".json")) return false;
-			if (rel === "community-plugins.json") return o.plugins;
+			if (NEVER.has(parts[0]) || !parts[0].endsWith(".json")) return false;
+			if (parts[0] === "community-plugins.json") return o.plugins;
 			return o.settings;
 		}
 		if (parts[0] === "themes" || parts[0] === "snippets") return o.appearance;
-		if (parts[0] === "plugins") return o.plugins && parts.length >= 3 && parts[1] !== ownPluginId;
+		if (parts[0] === "plugins") return o.plugins && parts.length >= 3 && parts[1] !== own;
 		return false;
 	};
 }

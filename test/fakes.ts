@@ -101,5 +101,5 @@ export function device(drive: FakeDrive, name: string, configEnabled = false) {
   const engine = new SyncEngine(app as never, drive as never, state,
     () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config }),
     ".obsidian/plugins/gdrive-vault-sync/base", async () => {});
-  return { vault, sync: () => engine.run(), name, config };
+  return { vault, sync: (allowMassDelete = false) => engine.run(undefined, allowMassDelete), name, config };
 }

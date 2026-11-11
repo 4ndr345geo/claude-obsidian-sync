@@ -37,7 +37,13 @@ export async function authorizeDesktop(clientId: string, clientSecret: string): 
 					res.writeHead(404).end();
 					return;
 				}
-				const ok = url.searchParams.get("state") === state && url.searchParams.get("code");
+				// Requests without our random state do not come from the login we
+				// started: answer them, but keep waiting for the real one.
+				if (req.method !== "GET" || url.searchParams.get("state") !== state) {
+					res.writeHead(400).end();
+					return;
+				}
+				const ok = !!url.searchParams.get("code");
 				res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 				res.end(
 					ok
@@ -105,7 +111,17 @@ export function exportConnection(c: Credentials): string {
 export function importConnection(code: string): Credentials {
 	const trimmed = code.trim();
 	if (!trimmed.startsWith(CODE_PREFIX)) throw new Error("Ungültiger Verbindungscode.");
-	const [clientId, clientSecret, refreshToken] = JSON.parse(atob(trimmed.slice(CODE_PREFIX.length)));
+	if (trimmed.length > 4000) throw new Error("Ungültiger Verbindungscode.");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(atob(trimmed.slice(CODE_PREFIX.length)));
+	} catch {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	if (!Array.isArray(parsed) || parsed.length !== 3 || parsed.some((v) => typeof v !== "string")) {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	const [clientId, clientSecret, refreshToken] = parsed as string[];
 	if (!clientId || !refreshToken) throw new Error("Ungültiger Verbindungscode.");
 	return { clientId, clientSecret, refreshToken };
 }

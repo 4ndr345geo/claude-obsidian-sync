@@ -3,6 +3,7 @@ import SparkMD5 from "spark-md5";
 import { DriveClient } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
 import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
+import { isSafeSyncPath } from "./paths";
 import { Action, BaseEntry, LocalEntry, planSync, RemoteEntry } from "./plan";
 
 export interface SyncState {
@@ -51,6 +52,21 @@ export interface SyncResult {
 	/** What happened, file by file (for the sync log). */
 	events: SyncEvent[];
 }
+
+/** Thrown before anything is changed when a sync would delete unusually many files. */
+export class MassDeleteError extends Error {
+	constructor(public local: number, public remote: number, public total: number) {
+		super(
+			`Sicherheitsstopp: Diese Synchronisierung würde ${local + remote} von ${total} Dateien löschen ` +
+				`(${local} auf diesem Gerät, ${remote} in Google Drive). Es wurde nichts geändert.`
+		);
+	}
+}
+
+/** A sync that deletes at least this many files … */
+export const MASS_DELETE_MIN = 20;
+/** … and at least this share of all files needs a confirmation. */
+export const MASS_DELETE_SHARE = 0.5;
 
 export function md5(data: ArrayBuffer): string {
 	return SparkMD5.ArrayBuffer.hash(data);
@@ -125,7 +141,10 @@ export class SyncEngine {
 		return this.app.vault;
 	}
 
-	async run(onProgress?: (msg: string) => void): Promise<SyncResult> {
+	/**
+	 * @param allowMassDelete  the user confirmed that many deletions are intended
+	 */
+	async run(onProgress?: (msg: string) => void, allowMassDelete = false): Promise<SyncResult> {
 		const s = this.settings();
 		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [] };
 
@@ -142,8 +161,19 @@ export class SyncEngine {
 		const remoteList = await this.drive.listFiles(this.state.folderId);
 		const userExcluded = makeExcluder(s.excludes);
 		const configWanted = makeConfigFilter(this.vault.configDir, this.ownPluginId, s.config);
+		// The same rule for local and remote files. Unsafe paths (leaving the
+		// vault, hidden folders, aliases of the settings folder) are ignored.
 		const excluded = (p: string) =>
-			userExcluded(p) || (this.isConfig(p) && !configWanted(p));
+			!isSafeSyncPath(p, this.vault.configDir) ||
+			userExcluded(p) ||
+			(this.isConfig(p) && !configWanted(p));
+		const unsafe = remoteList.filter((r) => !isSafeSyncPath(r.path, this.vault.configDir));
+		if (unsafe.length) {
+			console.warn(
+				`[Google Drive Sync] ${unsafe.length} Datei(en) in Google Drive mit unsicherem Pfad ignoriert:`,
+				unsafe.slice(0, 20).map((r) => r.path)
+			);
+		}
 		const remoteFiltered = remoteList.filter((r) => !excluded(r.path));
 		const remoteById = new Map(remoteFiltered.map((r) => [r.id, r]));
 
@@ -154,6 +184,19 @@ export class SyncEngine {
 		const plan = planSync(local, remoteFiltered, this.state.base);
 		const work = plan.actions.filter((a) => a.type !== "setBase" && a.type !== "dropBase");
 		let done = 0;
+
+		// An emptied or replaced Drive folder (or an emptied vault) would look
+		// like "everything was deleted on the other side". Stop before that.
+		const delLocal = plan.actions.filter((a) => a.type === "deleteLocal").length;
+		const delRemote = plan.actions.filter((a) => a.type === "deleteRemote").length;
+		const total = Math.max(Object.keys(this.state.base).length, local.size, remoteFiltered.length);
+		if (
+			!allowMassDelete &&
+			delLocal + delRemote >= MASS_DELETE_MIN &&
+			delLocal + delRemote >= total * MASS_DELETE_SHARE
+		) {
+			throw new MassDeleteError(delLocal, delRemote, total);
+		}
 
 		for (const dup of plan.duplicates) {
 			const before = snapshot(result);

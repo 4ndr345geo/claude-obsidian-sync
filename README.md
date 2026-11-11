@@ -64,6 +64,49 @@ Zurückkehren in die App (Handy). So sind die Geräte fast immer auf dem gleiche
 es selbst angelegt hat**, nicht den Rest deines Google Drive. Es gibt keinen fremden Server
 dazwischen: Die Daten gehen direkt von deinem Gerät zu Google.
 
+## Sicherheit
+
+**Wo liegen die Zugangsdaten?** Das Plugin braucht drei Werte: OAuth-Client-ID, Client-Secret und
+das Refresh-Token (damit kann man dauerhaft auf den Sync-Ordner in Google Drive zugreifen).
+
+- **Ab Obsidian 1.11.4:** Client-Secret und Refresh-Token liegen im **Schlüsselbund von Obsidian**
+  (`app.secretStorage`), nicht mehr im Vault-Ordner. Sie sind damit nicht in ZIP-Backups
+  des Vaults, in anderen Sync-Diensten oder in einem Git-Repository des Vaults enthalten. Beim
+  ersten Start nach dem Update werden vorhandene Werte automatisch dorthin verschoben.
+  Wie der Schlüsselbund die Werte auf dem Gerät ablegt, bestimmt Obsidian. Andere Community-Plugins
+  im selben Vault können ihn lesen.
+- **Ältere Obsidian-Versionen:** Die Werte stehen **unverschlüsselt** in
+  `.obsidian/plugins/gdrive-vault-sync/data.json`. Diese Datei wird nie synchronisiert, steckt aber
+  in jedem Backup des Vault-Ordners.
+- In den Plugin-Einstellungen steht unter „Verbindung“, welche der beiden Varianten gerade gilt.
+- **Alte Backups** des Vaults (vor Version 1.5.0) enthalten das Token weiterhin. Wenn so ein Backup
+  in fremde Hände geraten sein könnte: Zugriff unter <https://myaccount.google.com/permissions>
+  widerrufen und neu verbinden.
+
+**Alle Geräte teilen sich ein Token.** Geht ein Gerät verloren, den Zugriff bei Google widerrufen
+(Link oben) und alle Geräte neu verbinden. „Verbindung trennen“ löscht das Token nur auf dem
+jeweiligen Gerät.
+
+**Verbindungscode und QR-Code enthalten den vollen Zugang.** Nicht fotografieren, nicht
+verschicken. Nach „Code kopieren“ wird die Zwischenablage nach 60 Sekunden geleert. Ein
+`obsidian://`-Link zum Verbinden wird nur angenommen, solange das Gerät **nicht** verbunden ist,
+und nie ohne Rückfrage mit Anzeige des Google-Kontos. Bestätige nur Codes, die du selbst erzeugt hast.
+
+**Schutz vor manipulierten Dateien in Google Drive.** Dateinamen aus Drive werden geprüft, bevor
+etwas geschrieben wird. Ignoriert werden Pfade, die aus dem Vault herausführen (`../`), versteckte
+Ordner (Name beginnt mit einem Punkt) außer dem Einstellungsordner, andere Schreibweisen des
+Einstellungsordners (`.Obsidian`, `OBSIDI~1`) und Namen mit `:` oder Steuerzeichen. Der Ordner
+dieses Plugins wird nie überschrieben. Solche Dateien werden auch lokal nicht synchronisiert.
+
+**Sicherheitsstopp bei Massenlöschung.** Würde eine Synchronisierung mindestens 20 Dateien und
+mindestens die Hälfte aller Dateien löschen (z. B. weil der Drive-Ordner geleert wurde oder der
+Vault nicht vollständig geladen ist), wird nichts geändert. Ein Klick auf die Statusleiste zeigt
+die Zahlen und fragt nach Bestätigung.
+
+**„Community-Plugins synchronisieren“ überträgt Programmcode.** Wer in deinen Drive-Ordner
+schreiben kann, kann damit Code auf allen Geräten ausführen. Die Option ist standardmäßig aus; nur
+einschalten, wenn dein Google-Konto gut geschützt ist (2-Faktor-Anmeldung).
+
 ---
 
 ## Einrichtung (einmalig, ca. 10 Minuten)
@@ -185,6 +228,8 @@ Aufbau:
 - `src/drive.ts`: Google Drive API (v3)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode
 - `src/config.ts`: welche Dateien aus `.obsidian` synchronisiert werden
+- `src/paths.ts`: Prüfung von Pfaden und Namen aus Google Drive
+- `src/secrets.ts`: Zugangsdaten im Schlüsselbund von Obsidian
 - `src/log.ts`: Sync-Protokoll pro Gerät
 - `src/main.ts`: Plugin, Einstellungen, automatische Auslöser
 

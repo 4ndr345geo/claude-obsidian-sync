@@ -17,7 +17,8 @@ import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { ConfigSyncOptions } from "./config";
 import { addEntry, formatEntry, logPath, makeLogMatcher } from "./log";
 import { Credentials, DriveClient } from "./drive";
-import { SyncEngine, SyncResult, SyncState } from "./sync";
+import { newInstallId, SecretStore } from "./secrets";
+import { MassDeleteError, SyncEngine, SyncResult, SyncState } from "./sync";
 
 interface Settings {
 	clientId: string;
@@ -34,6 +35,8 @@ interface Settings {
 	config: ConfigSyncOptions;
 	logEnabled: boolean;
 	logFolder: string;
+	/** Random id of this installation; part of the keychain entry names. */
+	installId: string;
 }
 
 interface PluginData {
@@ -67,6 +70,11 @@ export default class DriveSyncPlugin extends Plugin {
 	private lastError = "";
 	private statusEl!: HTMLElement;
 	private intervalId: number | null = null;
+	private secrets!: SecretStore;
+	/** A sync was stopped because it would delete very many files; waits for the user. */
+	private massDelete: MassDeleteError | null = null;
+	/** The user confirmed the deletions for the next run only. */
+	private massDeleteConfirmed = false;
 
 	async onload() {
 		await this.loadAll();
@@ -110,8 +118,19 @@ export default class DriveSyncPlugin extends Plugin {
 		});
 
 		// QR code / link from another device: obsidian://gdrive-vault-sync?code=ODS1:…
+		// Such a link can be opened by any website or app. It is therefore only
+		// accepted while this device is not connected, and never without asking.
 		this.registerObsidianProtocolHandler(LINK_ACTION, (params) => {
-			if (params.code) void this.connectWithCode(params.code);
+			if (!params.code) return;
+			if (this.isConnected()) {
+				new Notice(
+					"Google Drive Sync: Dieses Gerät ist bereits verbunden. Der Link wurde ignoriert. " +
+						"Zum Wechseln zuerst in den Einstellungen „Verbindung trennen“ wählen.",
+					10000
+				);
+				return;
+			}
+			void this.connectWithCode(params.code);
 		});
 
 		this.statusEl = this.addStatusBarItem();
@@ -171,6 +190,11 @@ export default class DriveSyncPlugin extends Plugin {
 			this.pending = true;
 			return;
 		}
+		// A stopped sync waits for the user; a manual sync checks again from scratch.
+		if (this.massDelete && !manual) return;
+		this.massDelete = null;
+		const allowMassDelete = this.massDeleteConfirmed;
+		this.massDeleteConfirmed = false;
 		this.syncing = true;
 		const progress = manual ? new Notice("Synchronisiere …", 0) : null;
 		const start = new Date();
@@ -178,14 +202,31 @@ export default class DriveSyncPlugin extends Plugin {
 			const result = await this.engine.run((msg) => {
 				this.statusEl.setText(`☁ ${msg}`);
 				progress?.setMessage(msg);
-			});
+			}, allowMassDelete);
 			this.lastSync = Date.now();
 			this.lastError = result.errors[0] ?? "";
 			this.report(result, manual);
 			await this.writeLog(start, result, null);
 		} catch (e) {
 			this.lastError = (e as Error).message;
-			new Notice(`Google Drive Sync: ${this.lastError}`, 8000);
+			if (e instanceof MassDeleteError) {
+				this.massDelete = e;
+				if (manual) {
+					progress?.hide();
+					void confirmMassDelete(this.app, e).then((yes) => {
+						if (!yes) return;
+						this.massDeleteConfirmed = true;
+						void this.sync(true);
+					});
+				} else {
+					new Notice(
+						`Google Drive Sync: ${this.lastError} Zum Prüfen auf das Wolken-Symbol in der Statusleiste klicken.`,
+						0
+					);
+				}
+			} else {
+				new Notice(`Google Drive Sync: ${this.lastError}`, 8000);
+			}
 			await this.writeLog(start, null, this.lastError);
 		} finally {
 			progress?.hide();
@@ -311,8 +352,9 @@ export default class DriveSyncPlugin extends Plugin {
 			new Notice(`Der Verbindungscode funktioniert nicht: ${(e as Error).message}`, 10000);
 			return;
 		}
-		new ConfirmConnectModal(this.app, email, async () => {
+		new ConfirmConnectModal(this.app, email, this.isConnected(), async () => {
 			Object.assign(this.settings, creds);
+			this.massDelete = null;
 			await this.saveAll();
 			new Notice(`Mit Google Drive verbunden ✓ (${email})`);
 			this.renderStatus();
@@ -342,6 +384,11 @@ export default class DriveSyncPlugin extends Plugin {
 		if (!this.statusEl || this.syncing) return;
 		if (!this.isConnected()) {
 			this.statusEl.setText("☁ nicht verbunden");
+			return;
+		}
+		if (this.massDelete) {
+			this.statusEl.setText("☁ ⚠ Bestätigung nötig");
+			this.statusEl.setAttr("aria-label", this.massDelete.message);
 			return;
 		}
 		if (this.lastError) {
@@ -378,18 +425,38 @@ export default class DriveSyncPlugin extends Plugin {
 				showNotices: false,
 				logEnabled: true,
 				logFolder: "Sync-Protokoll",
+				installId: "",
 			},
 			data.settings
 		);
+		if (!/^[a-z0-9]{6,32}$/.test(this.settings.installId)) this.settings.installId = newInstallId();
+		this.secrets = new SecretStore(this.app, this.manifest.id, this.settings.installId);
+		const inFile = !!(data.settings?.clientSecret || data.settings?.refreshToken);
+		if (this.secrets.available) {
+			// Values still in data.json (older version, or pasted there) win and
+			// are moved to the keychain by the save below.
+			this.settings.clientSecret ||= this.secrets.get("client-secret");
+			this.settings.refreshToken ||= this.secrets.get("refresh-token");
+		}
 		this.settings.config = Object.assign(
 			{ enabled: false, settings: true, appearance: true, plugins: true },
 			data.settings?.config
 		);
 		this.state = Object.assign({ base: {}, cache: {}, folderId: "", folderName: "" }, data.state);
+		if (inFile && this.secrets.available) await this.saveAll();
+	}
+
+	/** True if the credentials are kept in Obsidian's keychain instead of data.json. */
+	usesKeychain(): boolean {
+		return this.secrets.available;
 	}
 
 	async saveAll() {
-		await this.saveData({ settings: this.settings, state: this.state } satisfies PluginData);
+		const settings = { ...this.settings };
+		// Only blank a value in data.json after the keychain has verifiably taken it.
+		if (this.secrets.set("client-secret", settings.clientSecret)) settings.clientSecret = "";
+		if (this.secrets.set("refresh-token", settings.refreshToken)) settings.refreshToken = "";
+		await this.saveData({ settings, state: this.state } satisfies PluginData);
 	}
 }
 
@@ -437,11 +504,22 @@ class QrModal extends Modal {
 }
 
 class ConfirmConnectModal extends Modal {
-	constructor(app: App, private email: string, private onConfirm: () => void | Promise<void>) {
+	constructor(
+		app: App,
+		private email: string,
+		private replaces: boolean,
+		private onConfirm: () => void | Promise<void>
+	) {
 		super(app);
 	}
 	onOpen() {
 		this.titleEl.setText("Mit Google Drive verbinden?");
+		if (this.replaces) {
+			this.contentEl.createEl("p", {
+				cls: "mod-warning",
+				text: "⚠ Dieses Gerät ist bereits verbunden. Die bestehende Verbindung wird ersetzt.",
+			});
+		}
 		this.contentEl.createEl("p", {
 			text: `Dieses Gerät wird mit dem Google-Konto ${this.email || "(unbekannt)"} verbunden. Deine Notizen werden in dessen Google Drive synchronisiert.`,
 		});
@@ -450,11 +528,15 @@ class ConfirmConnectModal extends Modal {
 			text: "Nur bestätigen, wenn das dein eigenes Konto ist und du den Code selbst erzeugt hast.",
 		});
 		new Setting(this.contentEl)
-			.addButton((b) => b.setButtonText("Abbrechen").onClick(() => this.close()))
+			.addButton((b) => {
+				b.setButtonText("Abbrechen").onClick(() => this.close());
+				// Enter must not confirm by accident.
+				window.setTimeout(() => b.buttonEl.focus(), 0);
+			})
 			.addButton((b) =>
 				b
 					.setButtonText("Verbinden")
-					.setCta()
+					.setWarning()
 					.onClick(async () => {
 						this.close();
 						await this.onConfirm();
@@ -512,6 +594,13 @@ class DriveSyncSettingTab extends PluginSettingTab {
 				? `✓ Verbunden. Ordner in Google Drive: „${s.folderName}“`
 				: "Nicht verbunden. Anleitung: siehe README des Plugins."
 		);
+		containerEl.createDiv({
+			cls: "setting-item-description",
+			text: p.usesKeychain()
+				? "Zugangsdaten: im Schlüsselbund von Obsidian gespeichert, nicht im Vault-Ordner."
+				: `Zugangsdaten: unverschlüsselt in ${this.app.vault.configDir}/plugins/${p.manifest.id}/data.json ` +
+					"(diese Obsidian-Version hat keinen Schlüsselbund – ab 1.11.4 werden sie dorthin verschoben).",
+		});
 
 		if (Platform.isDesktopApp) {
 			new Setting(containerEl)
@@ -570,8 +659,17 @@ class DriveSyncSettingTab extends PluginSettingTab {
 				)
 				.addButton((b) =>
 					b.setButtonText("Code kopieren").onClick(async () => {
-						await navigator.clipboard.writeText(p.connectionCode());
-						new Notice("Verbindungscode kopiert.");
+						const copied = p.connectionCode();
+						await navigator.clipboard.writeText(copied);
+						new Notice("Verbindungscode kopiert. Die Zwischenablage wird nach 60 Sekunden geleert.");
+						// Best effort: do not leave the access in the clipboard (history, cloud clipboard).
+						window.setTimeout(async () => {
+							try {
+								if ((await navigator.clipboard.readText()) === copied) await navigator.clipboard.writeText("");
+							} catch {
+								/* clipboard not readable (e.g. app in background) */
+							}
+						}, 60_000);
 					})
 				);
 		}
@@ -594,6 +692,8 @@ class DriveSyncSettingTab extends PluginSettingTab {
 					.setWarning()
 					.onClick(async () => {
 						s.refreshToken = "";
+						// On phones/tablets the secret only came from the connection code.
+						if (!Platform.isDesktopApp) s.clientSecret = "";
 						await p.saveAll();
 						this.display();
 						p.renderStatus();
@@ -722,4 +822,36 @@ class DriveSyncSettingTab extends PluginSettingTab {
 				});
 			});
 	}
+}
+
+function confirmMassDelete(app: App, e: MassDeleteError): Promise<boolean> {
+	return new Promise((resolve) => {
+		let answer = false;
+		const m = new Modal(app);
+		m.titleEl.setText("Viele Dateien löschen?");
+		m.contentEl.createEl("p", { text: e.message });
+		m.contentEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				"Das passiert z. B., wenn der Ordner in Google Drive geleert oder ersetzt wurde oder der Vault auf diesem " +
+				"Gerät nicht vollständig geladen ist. Nur fortfahren, wenn du die Dateien wirklich gelöscht hast. " +
+				"Im Zweifel abbrechen und den Ordner in Google Drive (auch den Papierkorb) prüfen.",
+		});
+		new Setting(m.contentEl)
+			.addButton((b) => {
+				b.setButtonText("Abbrechen").onClick(() => m.close());
+				window.setTimeout(() => b.buttonEl.focus(), 0);
+			})
+			.addButton((b) =>
+				b
+					.setButtonText(`${e.local + e.remote} Dateien löschen`)
+					.setWarning()
+					.onClick(() => {
+						answer = true;
+						m.close();
+					})
+			);
+		m.onClose = () => resolve(answer);
+		m.open();
+	});
 }

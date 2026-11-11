@@ -12,8 +12,9 @@ betrieben.
 
 - **Notizen und Anhänge deines Obsidian-Vaults.** Sie werden direkt von deinem Gerät
   in **dein eigenes Google Drive** übertragen und von dort auf deine anderen Geräte geladen.
-- **Anmeldedaten für Google** (OAuth-Token). Sie werden nur lokal auf deinen Geräten in
-  den Einstellungen des Plugins gespeichert.
+- **Anmeldedaten für Google** (OAuth-Token). Sie werden nur lokal auf deinen Geräten
+  gespeichert: im Schlüsselbund von Obsidian (ab Obsidian 1.11.4), sonst unverschlüsselt in
+  den Einstellungen des Plugins im Vault-Ordner.
 
 ## Zugriff auf Google Drive
 

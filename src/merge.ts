@@ -220,6 +220,9 @@ function isPlainObject(v: unknown): v is Record<string, Json> {
 	return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+const get = (o: Record<string, Json>, k: string): Json | undefined => (own(o, k) ? o[k] : undefined);
+
 function deepEqual(a: unknown, b: unknown): boolean {
 	return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -236,10 +239,12 @@ function merge3(local: Json | undefined, base: Json | undefined, remote: Json | 
 	if (deepEqual(remote, base)) return local;
 	if (isPlainObject(local) && isPlainObject(remote)) {
 		const b = isPlainObject(base) ? base : undefined;
-		const out: Record<string, Json> = {};
-		const keys = [...Object.keys(local), ...Object.keys(remote).filter((k) => !(k in local))];
+		// No prototype: keys like "__proto__" or "constructor" from a settings
+		// file are plain data and must neither be lost nor change the object.
+		const out: Record<string, Json> = Object.create(null);
+		const keys = [...Object.keys(local), ...Object.keys(remote).filter((k) => !own(local, k))];
 		for (const k of keys) {
-			const v = merge3(local[k], b?.[k], remote[k], localNewer);
+			const v = merge3(get(local, k), b ? get(b, k) : undefined, get(remote, k), localNewer);
 			if (v !== undefined) out[k] = v;
 		}
 		return out;
