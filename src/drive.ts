@@ -93,6 +93,10 @@ export class DriveClient {
 	};
 	/** Large files are sent in pieces of this size (multiple of 256 KiB, required by Google). */
 	chunkSize = 8 * 1024 * 1024;
+	/** A 308 answer has been seen: piecewise uploads work on this device. */
+	private chunkedVerified = false;
+	/** Fallback active: piecewise uploads did not work here, large files go in one piece. */
+	chunkedUnsupported = false;
 	/** Interrupted large uploads, so the next attempt continues instead of starting over. Memory only. */
 	private sessions = new Map<string, { url: string; created: number }>();
 
@@ -339,8 +343,64 @@ export class DriveClient {
 			return toEntry(safeJson(res));
 		}
 
-		// Large files: resumable upload in pieces. After a dropout the upload
-		// continues where Google stopped receiving, instead of starting over.
+		if (this.chunkedUnsupported) return this.uploadWhole(base, method, fields, metadata, data);
+		try {
+			return await this.uploadChunked(base, method, fields, metadata, data, folderId, path, id);
+		} catch (e) {
+			// Fallback: if piecewise uploading never worked on this device (e.g. the
+			// app does not pass Google's "308" answer through), send the file in one
+			// piece as earlier versions did, and keep doing so.
+			const suspicious = e instanceof DriveError && (e.network || e.kind === "unexpected");
+			if (this.chunkedVerified || !suspicious || !this.online()) throw e;
+			const entry = await this.uploadWhole(base, method, fields, metadata, data);
+			this.chunkedUnsupported = true;
+			console.warn("[Google Drive Sync] Upload in Teilen funktioniert hier nicht, große Dateien werden am Stück gesendet.", e);
+			return entry;
+		}
+	}
+
+	/** Resumable upload in one request (no resuming after a dropout). */
+	private async uploadWhole(
+		base: string,
+		method: string,
+		fields: string,
+		metadata: Record<string, unknown>,
+		data: ArrayBuffer
+	): Promise<RemoteEntry> {
+		const location = await this.startSession(base, method, fields, metadata);
+		const res = await this.request({ url: location, method: "PUT", body: data }, { bytes: data.byteLength });
+		return toEntry(safeJson(res));
+	}
+
+	private async startSession(base: string, method: string, fields: string, metadata: Record<string, unknown>): Promise<string> {
+		const init = await this.request({
+			url: `${base}?uploadType=resumable&${fields}`,
+			method,
+			contentType: "application/json; charset=UTF-8",
+			body: JSON.stringify(metadata),
+		});
+		const location = header(init, "Location");
+		// The access token is sent to this address, so it has to be Google's.
+		if (!location || !location.startsWith(UPLOAD + "/")) {
+			throw new DriveError("Upload-Sitzung konnte nicht gestartet werden.", init.status, "unexpected", "file");
+		}
+		return location;
+	}
+
+	/**
+	 * Large files: resumable upload in pieces. After a dropout the upload
+	 * continues where Google stopped receiving, instead of starting over.
+	 */
+	private async uploadChunked(
+		base: string,
+		method: string,
+		fields: string,
+		metadata: Record<string, unknown>,
+		data: ArrayBuffer,
+		folderId: string,
+		path: string,
+		id?: string
+	): Promise<RemoteEntry> {
 		const key = `${id ?? folderId}|${path}|${data.byteLength}|${SparkMD5.ArrayBuffer.hash(data)}`;
 		let restarted = false;
 		for (;;) {
@@ -357,18 +417,7 @@ export class DriveClient {
 				}
 			}
 			if (!session) {
-				const init = await this.request({
-					url: `${base}?uploadType=resumable&${fields}`,
-					method,
-					contentType: "application/json; charset=UTF-8",
-					body: JSON.stringify(metadata),
-				});
-				const location = header(init, "Location");
-				// The access token is sent to this address, so it has to be Google's.
-				if (!location || !location.startsWith(UPLOAD + "/")) {
-					throw new DriveError("Upload-Sitzung konnte nicht gestartet werden.", init.status, "unexpected", "file");
-				}
-				session = { url: location, created: Date.now() };
+				session = { url: await this.startSession(base, method, fields, metadata), created: Date.now() };
 				this.sessions.set(key, session);
 			}
 			const result = await this.sendChunks(session.url, data, offset);
@@ -417,6 +466,7 @@ export class DriveClient {
 				throw e;
 			}
 			if (res.status === 308) {
+				this.chunkedVerified = true;
 				offset = receivedUntil(res) ?? end;
 				failures = 0;
 				continue;
@@ -457,7 +507,10 @@ export class DriveClient {
 			this.timeouts.meta,
 			"file"
 		);
-		if (res.status === 308) return receivedUntil(res) ?? 0;
+		if (res.status === 308) {
+			this.chunkedVerified = true;
+			return receivedUntil(res) ?? 0;
+		}
 		if (isSuccess(res.status)) return toEntry(safeJson(res));
 		if (res.status === 404 || res.status === 410) return "expired";
 		const error = safeJson(res).error ?? {};

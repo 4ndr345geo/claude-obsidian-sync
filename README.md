@@ -267,6 +267,41 @@ Synchronisieren und danach die anderen Geräte einschalten.
   „Ausschließen“ eine Zeile wie `.obsidian/plugins/obsidian-git/**` eintragen.
 - **Abschalten** löscht nichts, weder lokal noch in Google Drive.
 
+## Lokale Sicherungen
+
+Bevor die Synchronisierung eine Datei **auf diesem Gerät überschreibt oder löscht**, wird die
+bisherige Version gesichert, in
+`.obsidian/plugins/gdrive-vault-sync/backups/<Datum>/<Uhrzeit>/<Pfad>`.
+
+- Das betrifft: Download einer neueren Version, Zusammenführen, Löschen (auch Einstellungsdateien,
+  die sonst endgültig gelöscht würden), Einstellungen von anderen Geräten, Wiederherstellen.
+- **Zurückholen:** Befehl **„Frühere Version aus lokaler Sicherung wiederherstellen“** (alle
+  Sicherungen, Suche nach Datei oder Datum) oder **„Frühere Versionen dieser Datei anzeigen“**.
+  Die Version, die dabei ersetzt wird, wird ebenfalls gesichert, und die wiederhergestellte
+  Version wird auf die anderen Geräte übertragen.
+- Kann die Sicherung nicht geschrieben werden (z. B. Speicher voll), bleibt die Datei unverändert
+  und wird zurückgestellt.
+- Aufbewahrung: 30 Tage, höchstens 300 MB (einstellbar). Dateien über einem Viertel davon
+  (höchstens 50 MB) werden nicht gesichert; für sie hält Google Drive alte Versionen 30 Tage lang.
+- Die Sicherungen bleiben **nur auf diesem Gerät** und werden nicht synchronisiert. Sie sind
+  unverschlüsselt und werden beim Deinstallieren des Plugins mit gelöscht. Sie ersetzen kein
+  echtes Backup des Vaults.
+- Die Sync-Protokolle anderer Geräte werden nicht gesichert.
+
+## Ausweichwege
+
+| Problem | Ausweichweg |
+|---|---|
+| Notiz ist kein gültiger UTF-8-Text (z. B. alte Windows-Datei) | wird nicht zusammengeführt, sondern wie ein Bild behandelt: beide Fassungen bleiben, eine als Konfliktkopie |
+| Zusammenführen scheitert unerwartet | ebenso: Konfliktkopie statt Fehler |
+| Einstellungsdatei ist kein gültiges JSON | neuere Version gewinnt (ältere ist gesichert) |
+| Papierkorb von Obsidian nicht verfügbar | System-Papierkorb, dann `.trash` im Vault |
+| Datei existiert, ist Obsidian aber noch nicht bekannt | wird direkt geschrieben (vorher gesichert) |
+| Upload in Teilen funktioniert auf dem Gerät nicht | große Dateien werden am Stück gesendet, bis Obsidian neu startet |
+| Schlüsselbund nicht verfügbar | Zugangsdaten in `data.json` |
+| `data.json` beschädigt | Kopie wird angelegt, Einstellungen zurückgesetzt |
+| Basis-Kopie einer Notiz fehlt | Zusammenführen anhand der gemeinsamen Zeilen beider Fassungen |
+
 ## Sync-Protokoll
 
 Jedes Gerät schreibt ein Protokoll als Notiz nach **`Sync-Protokoll/<Gerätename>.md`**. Weil jedes Gerät
@@ -300,6 +335,7 @@ Aufbau:
 - `src/merge.ts`: 3-Wege-Merge mit Markdown-gerechter Markierung kritischer Stellen
 - `src/sync.ts`: führt den Plan aus
 - `src/drive.ts`: Google Drive API (v3)
+- `src/backup.ts`: lokale Sicherungen vor dem Überschreiben/Löschen
 - `src/isolation.ts`: Zurückstellen einzelner Dateien nach Fehlern
 - `src/http.ts`: Auswertung der HTTP-Statuscodes (Wiederholen, Abbrechen, Meldung)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode

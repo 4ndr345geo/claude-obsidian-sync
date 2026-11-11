@@ -16,6 +16,10 @@ betrieben.
   gespeichert: im Schlüsselbund von Obsidian (ab Obsidian 1.11.4), sonst unverschlüsselt in
   den Einstellungen des Plugins im Vault-Ordner.
 
+- **Lokale Sicherungen.** Frühere Versionen von Dateien, die die Synchronisierung
+  überschreibt oder löscht, werden nur auf dem jeweiligen Gerät im Ordner des Plugins
+  gespeichert (standardmäßig 30 Tage) und nicht übertragen.
+
 ## Zugriff auf Google Drive
 
 Das Plugin nutzt ausschließlich die Berechtigung

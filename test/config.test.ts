@@ -89,7 +89,7 @@ test("Sync: deinstalliertes Plugin wird auf den anderen Geräten entfernt", asyn
   a.vault.hidden.delete(".obsidian/plugins/alt/main.js");
   a.vault.hidden.delete(".obsidian/plugins/alt/manifest.json");
   await a.sync(); await b.sync();
-  assert.ok(![...b.vault.hidden.keys()].some((k) => k.includes("plugins/alt")));
+  assert.ok(![...b.vault.hidden.keys()].some((k) => k.includes("plugins/alt") && !k.includes("/backups/")));
 });
 
 test("Sync: Gerät ohne Einstellungs-Sync ignoriert fremde Einstellungen und löscht nichts", async () => {

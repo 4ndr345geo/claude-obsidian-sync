@@ -15,7 +15,8 @@ import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { ConfigSyncOptions } from "./config";
-import { addEntry, formatEntry, logPath, makeLogMatcher } from "./log";
+import { addEntry, formatDateTime, formatEntry, logPath, makeLogMatcher } from "./log";
+import type { BackupEntry } from "./backup";
 import { Credentials, DriveClient, DriveError } from "./drive";
 import type { FailureEntry } from "./isolation";
 import { isSafeSyncPath } from "./paths";
@@ -39,6 +40,9 @@ interface Settings {
 	logFolder: string;
 	/** Random id of this installation; part of the keychain entry names. */
 	installId: string;
+	backupEnabled: boolean;
+	backupKeepDays: number;
+	backupMaxMB: number;
 }
 
 interface PluginData {
@@ -100,6 +104,14 @@ export default class DriveSyncPlugin extends Plugin {
 				deviceName: this.settings.deviceName,
 				excludes: this.settings.excludes.split("\n"),
 				config: this.settings.config,
+				backup: {
+					enabled: this.settings.backupEnabled,
+					keepDays: this.settings.backupKeepDays,
+					maxTotalBytes: this.settings.backupMaxMB * 1024 * 1024,
+					maxFileBytes: Math.min(50, this.settings.backupMaxMB / 4) * 1024 * 1024,
+				},
+				// The logs of other devices change all the time; their old versions are not worth keeping.
+				skipBackup: (p) => this.isLogFile(p),
 			}),
 			`${this.app.vault.configDir}/plugins/${this.manifest.id}/base`,
 			() => this.saveAll(),
@@ -117,6 +129,21 @@ export default class DriveSyncPlugin extends Plugin {
 			id: "open-log",
 			name: "Sync-Protokoll dieses Geräts öffnen",
 			callback: () => this.openLog(),
+		});
+		this.addCommand({
+			id: "restore-backup",
+			name: "Frühere Version aus lokaler Sicherung wiederherstellen",
+			callback: () => this.showBackups(),
+		});
+		this.addCommand({
+			id: "restore-backup-current",
+			name: "Frühere Versionen dieser Datei anzeigen",
+			checkCallback: (checking) => {
+				const f = this.app.workspace.getActiveFile();
+				if (!f) return false;
+				if (!checking) void this.showBackups(f.path);
+				return true;
+			},
 		});
 		this.addCommand({
 			id: "show-failures",
@@ -418,6 +445,34 @@ export default class DriveSyncPlugin extends Plugin {
 		if (f instanceof TFile) await this.app.workspace.getLeaf(false).openFile(f);
 	}
 
+	async showBackups(onlyPath?: string) {
+		let list = await this.engine.backups.list();
+		if (onlyPath) list = list.filter((b) => b.original === onlyPath);
+		if (!list.length) {
+			new Notice(onlyPath ? "Für diese Datei gibt es keine Sicherung." : "Es gibt noch keine Sicherungen.");
+			return;
+		}
+		new BackupListModal(this.app, list, async (b) => {
+			if (this.syncing) {
+				new Notice("Bitte warten, bis die Synchronisierung fertig ist.");
+				return;
+			}
+			try {
+				this.syncing = true;
+				await this.engine.restore(b.backupPath, b.original);
+				new Notice(`Wiederhergestellt: ${b.original} (Stand ${formatDateTime(new Date(b.time))}). Die ersetzte Version wurde ebenfalls gesichert.`);
+				if (b.original.startsWith(this.app.vault.configDir + "/")) {
+					new Notice("Einstellungen wiederhergestellt – Obsidian neu laden, damit sie wirken.", 10000);
+				}
+			} catch (e) {
+				new Notice(`Wiederherstellen fehlgeschlagen: ${(e as Error).message}`, 10000);
+			} finally {
+				this.syncing = false;
+			}
+			void this.sync(false);
+		}).open();
+	}
+
 	failureCount(): number {
 		return Object.keys(this.state.failures ?? {}).length;
 	}
@@ -518,6 +573,9 @@ export default class DriveSyncPlugin extends Plugin {
 				logEnabled: true,
 				logFolder: "Sync-Protokoll",
 				installId: "",
+				backupEnabled: true,
+				backupKeepDays: 30,
+				backupMaxMB: 300,
 				config: { enabled: false, settings: true, appearance: true, plugins: true },
 		};
 		this.settings = Object.assign({}, defaults, data.settings);
@@ -526,6 +584,8 @@ export default class DriveSyncPlugin extends Plugin {
 			if (typeof this.settings[key] !== typeof defaults[key]) (this.settings as any)[key] = defaults[key];
 		}
 		if (!isRecord(this.settings.config)) this.settings.config = defaults.config;
+		if (!(this.settings.backupKeepDays >= 1 && this.settings.backupKeepDays <= 365)) this.settings.backupKeepDays = 30;
+		if (!(this.settings.backupMaxMB >= 20 && this.settings.backupMaxMB <= 5000)) this.settings.backupMaxMB = 300;
 		if (!(this.settings.autoSyncMinutes >= 0 && this.settings.autoSyncMinutes <= 30)) this.settings.autoSyncMinutes = 2;
 		if (!isSafeSyncPath(this.settings.logFolder.replace(/^\/+|\/+$/g, ""), this.app.vault.configDir)) {
 			this.settings.logFolder = defaults.logFolder;
@@ -674,6 +734,23 @@ class ConfirmConnectModal extends Modal {
 	}
 	onClose() {
 		this.contentEl.empty();
+	}
+}
+
+class BackupListModal extends FuzzySuggestModal<BackupEntry> {
+	constructor(app: App, private entries: BackupEntry[], private choose: (b: BackupEntry) => void) {
+		super(app);
+		this.setPlaceholder(`${entries.length} Sicherung(en) – Datei oder Datum eingeben, auswählen zum Wiederherstellen`);
+	}
+	getItems() {
+		return this.entries;
+	}
+	getItemText(b: BackupEntry) {
+		const kb = b.size < 1024 ? `${b.size} B` : `${Math.round(b.size / 1024)} KB`;
+		return `${b.original} — Stand vor ${formatDateTime(new Date(b.time))} (${kb})`;
+	}
+	onChooseItem(b: BackupEntry) {
+		this.choose(b);
 	}
 }
 
@@ -964,6 +1041,50 @@ class DriveSyncSettingTab extends PluginSettingTab {
 						s.logFolder = isSafeSyncPath(folder, this.app.vault.configDir) ? folder : "Sync-Protokoll";
 						await p.saveAll();
 					})
+				);
+		}
+
+		containerEl.createEl("h3", { text: "Sicherungen" });
+		new Setting(containerEl)
+			.setName("Lokale Sicherung vor dem Überschreiben")
+			.setDesc(
+				"Bevor die Synchronisierung eine Datei auf diesem Gerät überschreibt oder löscht, wird die bisherige Version " +
+					`in ${this.app.vault.configDir}/plugins/${p.manifest.id}/backups gesichert (nur auf diesem Gerät). ` +
+					"Zurückholen: Befehl „Frühere Version aus lokaler Sicherung wiederherstellen“."
+			)
+			.addToggle((t) =>
+				t.setValue(s.backupEnabled).onChange(async (v) => {
+					s.backupEnabled = v;
+					await p.saveAll();
+					this.display();
+				})
+			)
+			.addButton((b) => b.setButtonText("Anzeigen").onClick(() => p.showBackups()));
+		if (s.backupEnabled) {
+			new Setting(containerEl)
+				.setName("Sicherungen aufbewahren (Tage)")
+				.addSlider((sl) =>
+					sl
+						.setLimits(1, 90, 1)
+						.setValue(s.backupKeepDays)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.backupKeepDays = v;
+							await p.saveAll();
+						})
+				);
+			new Setting(containerEl)
+				.setName("Höchstens belegter Speicher (MB)")
+				.setDesc("Darüber werden die ältesten Sicherungen entfernt. Einzelne Dateien über einem Viertel davon (max. 50 MB) werden nicht gesichert.")
+				.addSlider((sl) =>
+					sl
+						.setLimits(50, 2000, 50)
+						.setValue(s.backupMaxMB)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.backupMaxMB = v;
+							await p.saveAll();
+						})
 				);
 		}
 

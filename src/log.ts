@@ -90,6 +90,7 @@ export function formatEntry(
 		["⚠", count("marked") + count("copy")],
 		["❌", count("error")],
 		["⏸", result?.held ?? 0],
+		["💾", result?.backedUp ?? 0],
 	]
 		.filter(([, n]) => n)
 		.map(([s, n]) => `${s} ${n}`);

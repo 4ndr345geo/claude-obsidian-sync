@@ -80,7 +80,7 @@ export class FakeVault {
   adapter = {
     exists: async (p: string) => this.hiddenExists(p),
     mkdir: async () => {},
-    rmdir: async () => {},
+    rmdir: async (dir: string) => { for (const k of [...this.hidden.keys()]) if (k.startsWith(dir + "/")) this.hidden.delete(k); },
     write: async (p: string, t: string) => this.setHidden(p, t),
     writeBinary: async (p: string, d: ArrayBuffer) => this.setHidden(p, copy(d)),
     read: async (p: string) => this.hiddenText(p)!,
@@ -115,8 +115,9 @@ export function device(drive: FakeDrive, name: string, configEnabled = false) {
   const state: SyncState = { base: {}, cache: {}, folderId: "", folderName: "" };
   const app = { vault, fileManager: { trashFile: async (f: { path: string }) => vault.remove(f.path) } };
   const config = { enabled: configEnabled, settings: true, appearance: true, plugins: true };
+  const backup = { enabled: true, keepDays: 30, maxTotalBytes: 100 * 1024 * 1024, maxFileBytes: 10 * 1024 * 1024 };
   const engine = new SyncEngine(app as never, drive as never, state,
-    () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config }),
+    () => ({ folderName: "Test", deviceName: name, excludes: [".trash/**"], config, backup }),
     ".obsidian/plugins/gdrive-vault-sync/base", async () => {});
-  return { vault, state, sync: (allowMassDelete = false, retryFailed = false) => engine.run(undefined, allowMassDelete, retryFailed), name, config };
+  return { vault, state, engine, backup, sync: (allowMassDelete = false, retryFailed = false) => engine.run(undefined, allowMassDelete, retryFailed), name, config };
 }

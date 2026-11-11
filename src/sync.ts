@@ -1,8 +1,9 @@
-import { App, normalizePath, TFile, TFolder } from "obsidian";
+import { App, normalizePath, TAbstractFile, TFile, TFolder } from "obsidian";
 import SparkMD5 from "spark-md5";
 import { DriveClient, DriveError } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
 import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
+import { BackupOptions, BackupStore } from "./backup";
 import { Failures, FailureTracker, fingerprint } from "./isolation";
 import { isSafeSyncPath } from "./paths";
 import { Action, BaseEntry, LocalEntry, planSync, RemoteEntry } from "./plan";
@@ -15,6 +16,8 @@ export interface SyncState {
 	folderName: string;
 	/** Files that failed and are held back for a while (per-file fault isolation). */
 	failures?: Failures;
+	/** Last clean-up of the backup folder (ms) */
+	lastBackupPrune?: number;
 }
 
 export interface SyncSettingsView {
@@ -22,6 +25,9 @@ export interface SyncSettingsView {
 	deviceName: string;
 	excludes: string[];
 	config: ConfigSyncOptions;
+	backup: BackupOptions;
+	/** Files whose previous version is not worth a backup (e.g. the sync logs) */
+	skipBackup?: (path: string) => boolean;
 }
 
 export type SyncEventKind =
@@ -56,6 +62,8 @@ export interface SyncResult {
 	events: SyncEvent[];
 	/** Files held back in this run because they failed recently (see isolation.ts). */
 	held: number;
+	/** Previous versions saved to the local backup folder before they were replaced or deleted */
+	backedUp: number;
 }
 
 /** Thrown before anything is changed when a sync would delete unusually many files. */
@@ -80,6 +88,19 @@ interface ScanContext {
 	remoteMd5: Map<string, string[]>;
 	fileFailed: (path: string, e: unknown, kind: "read", fp: string, folder?: boolean) => void;
 	out: Map<string, LocalEntry>;
+}
+
+/**
+ * Decodes both versions of a note strictly as UTF-8.
+ * @returns null if one of them is not valid text (it would be damaged by a merge)
+ */
+export function decodeStrict(a: ArrayBuffer, b: ArrayBuffer): [string, string] | null {
+	try {
+		const dec = new TextDecoder("utf-8", { fatal: true });
+		return [dec.decode(a), dec.decode(b)];
+	} catch {
+		return null;
+	}
 }
 
 export function md5(data: ArrayBuffer): string {
@@ -132,6 +153,8 @@ function recordEvents(r: SyncResult, b: ReturnType<typeof snapshot>, path: strin
 }
 
 export class SyncEngine {
+	readonly backups: BackupStore;
+
 	constructor(
 		private app: App,
 		private drive: DriveClient,
@@ -140,7 +163,13 @@ export class SyncEngine {
 		private baseDir: string,
 		private persist: () => Promise<void>,
 		private ownPluginId = "gdrive-vault-sync"
-	) {}
+	) {
+		this.backups = new BackupStore(
+			this.app.vault.adapter as never,
+			normalizePath(baseDir).replace(/\/base$/, "") + "/backups",
+			() => this.settings().backup
+		);
+	}
 
 	private get configPrefix() {
 		return this.vault.configDir + "/";
@@ -164,7 +193,8 @@ export class SyncEngine {
 	 */
 	async run(onProgress?: (msg: string) => void, allowMassDelete = false, retryFailed = false): Promise<SyncResult> {
 		const s = this.settings();
-		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [], held: 0 };
+		const result: SyncResult = { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [], held: 0, backedUp: 0 };
+		this.backups.beginRun();
 		this.state.failures ??= {};
 		const tracker = new FailureTracker(this.state.failures, retryFailed);
 		/** Reports a failure of one file; a problem that just repeats itself is not reported again. */
@@ -346,6 +376,17 @@ export class SyncEngine {
 			result.events.push({ kind: "error", path: "Google Drive", detail: msg });
 		}
 
+		result.backedUp = this.backups.count;
+		// Clean up old backups a few times a day (never fails the sync).
+		if (Date.now() - (this.state.lastBackupPrune ?? 0) > 6 * 3600_000) {
+			try {
+				await this.backups.prune();
+				this.state.lastBackupPrune = Date.now();
+			} catch (e) {
+				console.warn("[Google Drive Sync] Alte Sicherungen konnten nicht entfernt werden", e);
+			}
+		}
+
 		// Forget cache entries for files that are gone or no longer synchronised.
 		for (const p of Object.keys(this.state.cache)) {
 			if (local.has(p) || localStat.has(p)) continue;
@@ -513,13 +554,16 @@ export class SyncEngine {
 			}
 			case "deleteLocal": {
 				if (!(await this.unchangedSinceScan(a.path, local))) return;
+				// Keep a copy first: settings files are deleted for good, and Obsidian's
+				// own setting may also delete notes permanently instead of using a trash.
+				await this.backupCurrent(a.path);
 				if (this.isConfig(a.path)) {
 					if (await this.vault.adapter.exists(a.path)) await this.vault.adapter.remove(a.path);
 					await this.removeEmptyConfigParents(a.path);
 					r.configChanged = true;
 				} else {
 					const f = this.vault.getAbstractFileByPath(a.path);
-					if (f) await this.app.fileManager.trashFile(f);
+					if (f) await this.trash(f);
 					await this.removeEmptyParents(a.path);
 				}
 				await this.forget(a.path);
@@ -556,18 +600,25 @@ export class SyncEngine {
 
 		// 1) Text notes: three-way merge. Uncritical changes are combined,
 		//    critical ones are marked directly in the note.
-		if (isMergeable(path)) {
-			const dec = new TextDecoder();
-			const localText = dec.decode(localData);
-			const remoteText = dec.decode(remoteData);
-			const baseText = hasBase ? await this.readBaseText(path) : null;
-			const m = mergeText(
-				localText,
-				baseText,
-				remoteText,
-				{ label: this.settings().deviceName, time: file.stat.mtime },
-				{ label: remote?.device ?? "anderes Gerät", time: remote?.modifiedTime ?? 0 }
-			);
+		// Fallback: a note that is not valid UTF-8 text, or a merge that fails,
+		// is handled like an image – both versions are kept, nothing is mangled.
+		const texts = isMergeable(path) ? decodeStrict(localData, remoteData) : null;
+		let m: ReturnType<typeof mergeText> | null = null;
+		if (texts) {
+			try {
+				m = mergeText(
+					texts[0],
+					hasBase ? await this.readBaseText(path) : null,
+					texts[1],
+					{ label: this.settings().deviceName, time: file.stat.mtime },
+					{ label: remote?.device ?? "anderes Gerät", time: remote?.modifiedTime ?? 0 }
+				);
+			} catch (e) {
+				console.warn(`[Google Drive Sync] Zusammenführen von ${path} fehlgeschlagen, behalte beide Versionen`, e);
+			}
+		}
+		if (texts && m) {
+			const localText = texts[0];
 			const merged = new TextEncoder().encode(m.text).buffer as ArrayBuffer;
 			// Upload first. If it fails, nothing has changed on this device, and the
 			// next sync starts from the same state (otherwise the conflict marking
@@ -585,6 +636,9 @@ export class SyncEngine {
 			if (m.clean) r.merged++;
 			else r.marked.push(path);
 			return;
+		}
+		if (isMergeable(path)) {
+			console.warn(`[Google Drive Sync] ${path}: kein gültiger UTF-8-Text oder nicht zusammenführbar – Konfliktkopie`);
 		}
 
 		// 2) Binary files (images, PDFs …) cannot be merged:
@@ -711,7 +765,46 @@ export class SyncEngine {
 		if (await this.vault.adapter.exists(p)) await this.vault.adapter.remove(p);
 	}
 
+	/**
+	 * Copies the current local version of `path` to the backup folder, unless
+	 * it equals `next`. Throws if the copy fails – the file must then stay as it is.
+	 */
+	private async backupCurrent(path: string, next?: ArrayBuffer): Promise<void> {
+		if (this.settings().skipBackup?.(path)) return;
+		let current: ArrayBuffer | null;
+		try {
+			current = await this.readLocal(path);
+			if (!current && !this.isConfig(path) && (await this.vault.adapter.exists(path))) {
+				current = await this.vault.adapter.readBinary(path);
+			}
+		} catch (e) {
+			throw new Error(`Bisherige Version kann nicht gesichert werden (nicht lesbar): ${(e as Error)?.message ?? e}`);
+		}
+		if (!current || (next && current.byteLength === next.byteLength && md5(current) === md5(next))) return;
+		try {
+			await this.backups.save(path, current);
+		} catch (e) {
+			throw new Error(`Sicherung der bisherigen Version fehlgeschlagen, Datei bleibt unverändert: ${(e as Error)?.message ?? e}`);
+		}
+	}
+
+	/** Trash with fallbacks: Obsidian's setting → system trash → vault's .trash folder. */
+	private async trash(f: TAbstractFile) {
+		try {
+			await this.app.fileManager.trashFile(f);
+			return;
+		} catch (e) {
+			console.warn("[Google Drive Sync] Papierkorb nicht verfügbar, versuche Alternativen", e);
+		}
+		try {
+			await this.vault.trash(f, true);
+		} catch {
+			await this.vault.trash(f, false);
+		}
+	}
+
 	private async writeLocal(path: string, data: ArrayBuffer): Promise<void> {
+		await this.backupCurrent(path, data);
 		if (this.isConfig(path)) {
 			const adapter = this.vault.adapter;
 			const parts = path.split("/").slice(0, -1);
@@ -731,7 +824,25 @@ export class SyncEngine {
 		if (dir && !this.vault.getAbstractFileByPath(dir)) {
 			await this.vault.createFolder(dir).catch(() => undefined);
 		}
-		await this.vault.createBinary(path, data);
+		try {
+			await this.vault.createBinary(path, data);
+		} catch (e) {
+			// Fallback: the file exists on disk but Obsidian has not indexed it yet
+			// (e.g. just created by another app). Write it directly; it was backed up above.
+			if (!(await this.vault.adapter.exists(path))) throw e;
+			await this.vault.adapter.writeBinary(path, data);
+		}
+	}
+
+	/**
+	 * Puts a backed-up version back in place. The version it replaces is backed
+	 * up first, so a restore can be undone the same way.
+	 */
+	async restore(backupPath: string, original: string): Promise<void> {
+		if (!isSafeSyncPath(original, this.vault.configDir)) throw new Error("Ungültiger Pfad.");
+		const data = await this.backups.read(backupPath);
+		this.backups.beginRun();
+		await this.writeLocal(original, data);
 	}
 
 	private async removeEmptyParents(path: string) {
