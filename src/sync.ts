@@ -19,7 +19,35 @@ export interface SyncState {
 	failures?: Failures;
 	/** Last clean-up of the backup folder (ms) */
 	lastBackupPrune?: number;
+	/**
+	 * Copy of the file list in Google Drive, kept up to date with Drive's change
+	 * feed – so a run in a large vault asks only "what changed?" instead of
+	 * listing every file.
+	 */
+	remote?: RemoteCache;
 }
+
+export interface RemoteCache {
+	folderId: string;
+	/** Position in Drive's change feed; "" = the copy must be refreshed by a full listing */
+	token: string;
+	/** Last full listing (ms) */
+	fullAt: number;
+	files: Record<string, RemoteEntry>;
+}
+
+/** A full listing now and then, in case the change feed missed something. */
+export const FULL_LIST_EVERY = 60 * 60_000;
+/** Transfers running at the same time. */
+export const DEFAULT_PARALLEL = 4;
+/** Small files read for hashing are kept for the upload in the same run (no second read). */
+const READ_CACHE_FILE = 1024 * 1024;
+const READ_CACHE_TOTAL = 32 * 1024 * 1024;
+/** The sync state is written at most this often during a run (and always at its end). */
+const PERSIST_EVERY = 10_000;
+
+/** Lets Obsidian draw and react to input during long loops (no frozen app on phones). */
+const yieldToUi = () => new Promise<void>((r) => setTimeout(r, 0));
 
 export interface SyncSettingsView {
 	folderName: string;
@@ -29,6 +57,8 @@ export interface SyncSettingsView {
 	backup: BackupOptions;
 	/** Files whose previous version is not worth a backup (e.g. the sync logs) */
 	skipBackup?: (path: string) => boolean;
+	/** Transfers at the same time (default 4) */
+	parallel?: number;
 	/** Larger files are not synchronised on this device (memory guard, see MAX_TEXT_BYTES too) */
 	maxFileBytes?: number;
 }
@@ -129,6 +159,7 @@ interface ScanContext {
 	/** Memory guard: true (and the file is held back) if it is too large for this device */
 	tooLarge: (path: string, bytes: number | undefined, fp: string) => boolean;
 	out: Map<string, LocalEntry>;
+	progress?: (msg: string) => void;
 }
 
 /**
@@ -181,6 +212,41 @@ function snapshot(r: SyncResult) {
 	};
 }
 
+/** Creates a folder; parallel transfers may try the same folder at the same moment. */
+export async function mkdirSafe(adapter: { exists(p: string): Promise<boolean>; mkdir(p: string): Promise<void> }, dir: string) {
+	if (await adapter.exists(dir)) return;
+	try {
+		await adapter.mkdir(dir);
+	} catch (e) {
+		if (!(await adapter.exists(dir))) throw e;
+	}
+}
+
+function emptyResult(): SyncResult {
+	return { uploaded: 0, downloaded: 0, deleted: 0, merged: 0, marked: [], conflicts: [], errors: [], configChanged: false, events: [], held: 0, backedUp: 0 };
+}
+
+function mergeInto(r: SyncResult, o: SyncResult) {
+	r.uploaded += o.uploaded;
+	r.downloaded += o.downloaded;
+	r.deleted += o.deleted;
+	r.merged += o.merged;
+	r.marked.push(...o.marked);
+	r.conflicts.push(...o.conflicts);
+	r.errors.push(...o.errors);
+	r.events.push(...o.events);
+	r.configChanged ||= o.configChanged;
+}
+
+/** Runs fn for all items, at most `limit` at a time; stops starting new ones when stop() is true. */
+export async function runPool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>, stop: () => boolean) {
+	let next = 0;
+	const worker = async () => {
+		while (next < items.length && !stop()) await fn(items[next++]);
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 /** Derives per-file events from the counters an action changed. */
 function recordEvents(r: SyncResult, b: ReturnType<typeof snapshot>, path: string, localDelete: boolean) {
 	if (r.deleted > b.del) r.events.push({ kind: localDelete ? "delLocal" : "delRemote", path });
@@ -195,6 +261,13 @@ function recordEvents(r: SyncResult, b: ReturnType<typeof snapshot>, path: strin
 
 export class SyncEngine {
 	readonly backups: BackupStore;
+	/** Data read during the scan, reused within the same run (see READ_CACHE_*). */
+	private readCache = new Map<string, { mtime: number; size: number; data: ArrayBuffer }>();
+	private readCacheBytes = 0;
+	/** The change feed does not work for this account/app: always list everything. */
+	private changesUnavailable = false;
+	private lastPersist = 0;
+	private persisting: Promise<void> | null = null;
 
 	constructor(
 		private app: App,
@@ -255,6 +328,7 @@ export class SyncEngine {
 			if (!(await this.drive.folderUsable(this.state.folderId))) {
 				this.state.folderId = "";
 				this.state.base = {};
+				this.state.remote = undefined;
 			}
 		}
 		if (!this.state.folderId || this.state.folderName !== s.folderName) {
@@ -267,7 +341,7 @@ export class SyncEngine {
 		}
 
 		onProgress?.("Lese Google Drive …");
-		const remoteList = await this.drive.listFiles(this.state.folderId);
+		const remoteList = await this.remoteFiles(this.state.folderId, retryFailed);
 		const userExcluded = makeExcluder(s.excludes);
 		const configWanted = makeConfigFilter(this.vault.configDir, this.ownPluginId, s.config);
 		// The same rule for local and remote files. Unsafe paths (leaving the
@@ -302,7 +376,7 @@ export class SyncEngine {
 			tracker.held.add(path);
 			return true;
 		};
-		const scan: ScanContext = { excluded, tracker, localStat, remoteMd5, fileFailed, tooLarge, out: new Map() };
+		const scan: ScanContext = { excluded, tracker, localStat, remoteMd5, fileFailed, tooLarge, out: new Map(), progress: onProgress };
 		await this.scanLocal(scan);
 		if (s.config.enabled) await this.scanConfig(this.vault.configDir, scan);
 		const local = scan.out;
@@ -370,50 +444,60 @@ export class SyncEngine {
 		// Storage full: uploads are pointless, but downloads and deletions still work.
 		let uploadsBlocked: DriveError | null = null;
 		let skippedUploads = 0;
-
 		const notTried = new Set<string>();
 		/** Files in a row whose transfer ran out of time – two in a row means: the connection is bad. */
 		let slowInARow: string[] = [];
-		for (const action of plan.actions) {
+		/** An error that concerns the whole run: no new actions start, the run ends with it. */
+		let fatal: Error | null = null;
+		/** Files whose transfer failed because of the network (several at once with parallel transfers). */
+		const netFailed: string[] = [];
+		let connectionBad = false;
+
+		const handle = async (action: Action) => {
+			if (fatal) return;
 			if (uploadsBlocked && (action.type === "upload" || action.type === "conflict")) {
 				skippedUploads++;
 				notTried.add(action.path);
-				continue;
+				return;
 			}
+			if (action.type !== "setBase" && action.type !== "dropBase") {
+				done++;
+				onProgress?.(`Synchronisiere ${done}/${work.length} …`);
+			}
+			// Each action reports into its own result, merged afterwards: with
+			// parallel transfers the counters of different files must not mix.
+			const own = emptyResult();
 			try {
-				if (action.type !== "setBase" && action.type !== "dropBase") {
-					done++;
-					onProgress?.(`Synchronisiere ${done}/${work.length} …`);
-				}
-				const before = snapshot(result);
 				try {
-					await this.execute(action, local, remoteById, result);
+					await this.execute(action, local, remoteById, own);
 					slowInARow = [];
 				} finally {
-					recordEvents(result, before, action.path, action.type === "deleteLocal");
+					recordEvents(own, snapshot(emptyResult()), action.path, action.type === "deleteLocal");
+					mergeInto(result, own);
 				}
 			} catch (e) {
+				if (e instanceof DriveError && e.kind === "notFound") this.remoteStale();
 				if (e instanceof DriveError && e.kind === "quota") {
 					uploadsBlocked = e;
 					skippedUploads++;
 					notTried.add(action.path);
-					continue;
+					return;
 				}
 				// Problems that concern everything (login, no connection, Google down,
 				// rate limit): stop instead of failing once per file.
 				if (e instanceof DriveError && e.scope === "sync") {
-					await this.persist();
-					throw e;
+					fatal ??= e;
+					return;
 				}
 				// Everything else concerns only this file: hold it back, go on with the rest.
 				fileFailed(action.path, e, "other", fpOf(action.path));
 				if (e instanceof DriveError && e.network) {
 					slowInARow.push(action.path);
-					if (slowInARow.length >= 2) {
-						// Not the files, the connection: do not hold them back, stop the run.
-						for (const p of slowInARow) tracker.succeed(p);
-						await this.persist();
-						throw new DriveError(
+					netFailed.push(action.path);
+					if (slowInARow.length >= 2 && !fatal) {
+						// Not the files, the connection: stop the run (the files are not held back, see below).
+						connectionBad = true;
+						fatal = new DriveError(
 							"Die Verbindung zu Google ist zu langsam oder unterbrochen. Es wird später erneut versucht.",
 							0,
 							"timeout",
@@ -422,7 +506,21 @@ export class SyncEngine {
 					}
 				} else slowInARow = [];
 			}
-			if (done % 25 === 0) await this.persist();
+			await this.persistSoon();
+		};
+
+		// Deletions and conflicts one after the other (they touch folders and
+		// create copies); plain transfers in parallel.
+		const parallel = (a: Action) => a.type === "upload" || a.type === "download" || a.type === "setBase" || a.type === "dropBase";
+		for (const action of plan.actions.filter((a) => !parallel(a))) await handle(action);
+		await runPool(plan.actions.filter(parallel), Math.max(1, s.parallel ?? DEFAULT_PARALLEL), handle, () => !!fatal);
+		this.readCache.clear();
+		this.readCacheBytes = 0;
+		const stopped = fatal as Error | null; // set inside handle()
+		if (connectionBad) for (const p of netFailed) tracker.succeed(p);
+		if (stopped) {
+			await this.persist();
+			throw stopped;
 		}
 
 		// Files that failed before and went through without error now are fine again.
@@ -436,8 +534,9 @@ export class SyncEngine {
 				local.has(p) || remoteMd5.has(p) || localStat.has(p) || p in this.state.base ||
 				(this.state.failures![p]?.folder === true && s.config.enabled)
 		);
-		if (uploadsBlocked) {
-			const msg = `${uploadsBlocked.message} – ${skippedUploads} Datei(en) nicht hochgeladen`;
+		const blocked = uploadsBlocked as DriveError | null; // set inside handle()
+		if (blocked) {
+			const msg = `${blocked.message} – ${skippedUploads} Datei(en) nicht hochgeladen`;
 			result.errors.unshift(msg);
 			result.events.push({ kind: "error", path: "Google Drive", detail: msg });
 		}
@@ -467,11 +566,67 @@ export class SyncEngine {
 	}
 
 	/**
+	 * The file list of the sync folder. Usually only Drive's change feed is
+	 * read ("what changed since last time?"); a full listing happens on the first
+	 * run, after an error, once an hour and on manual syncs.
+	 */
+	private async remoteFiles(folderId: string, full: boolean): Promise<RemoteEntry[]> {
+		const c = this.state.remote;
+		const due = !c || c.folderId !== folderId || !c.token || Date.now() - c.fullAt > FULL_LIST_EVERY;
+		if (!full && !due && !this.changesUnavailable) {
+			try {
+				const ch = await this.drive.listChanges(c!.token, folderId);
+				for (const id of ch.removed) delete c!.files[id];
+				for (const e of ch.changed) c!.files[e.id] = e;
+				c!.token = ch.token;
+				return Object.values(c!.files);
+			} catch (e) {
+				// No connection etc.: the whole run stops anyway. Anything else: list everything.
+				if (e instanceof DriveError && e.network) throw e;
+				console.warn("[Google Drive Sync] Änderungsliste nicht verfügbar, lese alle Dateien", e);
+			}
+		}
+		// Ask for the position in the change feed *before* listing, so nothing
+		// that happens during the listing is missed.
+		let token = "";
+		if (!this.changesUnavailable) {
+			try {
+				token = await this.drive.startPageToken();
+			} catch (e) {
+				if (e instanceof DriveError && e.network) throw e;
+				this.changesUnavailable = true;
+			}
+		}
+		const list = await this.drive.listFiles(folderId);
+		this.state.remote = { folderId, token, fullAt: Date.now(), files: Object.fromEntries(list.map((e) => [e.id, e])) };
+		return list;
+	}
+
+	/** Something in the copy of the Drive list was wrong: list everything next time. */
+	private remoteStale() {
+		if (this.state.remote) this.state.remote.token = "";
+	}
+
+	/** Writes the sync state at most every PERSIST_EVERY ms (one write at a time). */
+	private async persistSoon() {
+		if (this.persisting || Date.now() - this.lastPersist < PERSIST_EVERY) return;
+		this.lastPersist = Date.now();
+		this.persisting = this.persist().finally(() => (this.persisting = null));
+		await this.persisting;
+	}
+
+	/**
 	 * Hashes all vault files. A file that cannot be read is held back (see
 	 * isolation.ts) instead of stopping the run or counting as deleted.
 	 */
 	private async scanLocal(c: ScanContext): Promise<void> {
-		for (const file of this.vault.getFiles()) {
+		const files = this.vault.getFiles();
+		let n = 0;
+		for (const file of files) {
+			if (++n % 200 === 0) {
+				c.progress?.(`Prüfe lokale Dateien … ${n}/${files.length}`);
+				await yieldToUi();
+			}
 			if (c.excluded(file.path)) continue;
 			const { mtime, size } = file.stat;
 			c.localStat.set(file.path, { mtime, size });
@@ -483,6 +638,7 @@ export class SyncEngine {
 				try {
 					const data = await this.vault.readBinary(file);
 					cached = { mtime, size, hash: md5(data) };
+					this.keepRead(file.path, mtime, size, data);
 				} catch (e) {
 					c.fileFailed(file.path, new Error(`Datei kann nicht gelesen werden: ${(e as Error)?.message ?? e}`), "read", fp);
 					c.tracker.held.add(file.path);
@@ -568,7 +724,19 @@ export class SyncEngine {
 		return f instanceof TFile ? { mtime: f.stat.mtime, size: f.stat.size } : null;
 	}
 
+	private keepRead(path: string, mtime: number, size: number, data: ArrayBuffer) {
+		if (size > READ_CACHE_FILE || this.readCacheBytes + size > READ_CACHE_TOTAL) return;
+		this.readCache.set(path, { mtime, size, data });
+		this.readCacheBytes += size;
+	}
+
 	private async readLocal(path: string): Promise<ArrayBuffer | null> {
+		const kept = this.readCache.get(path);
+		if (kept) {
+			const st = await this.statLocal(path);
+			if (st && st.mtime === kept.mtime && st.size === kept.size) return kept.data.slice(0);
+			this.readCache.delete(path);
+		}
 		if (this.isConfig(path)) {
 			return (await this.vault.adapter.exists(path)) ? this.vault.adapter.readBinary(path) : null;
 		}
@@ -937,10 +1105,7 @@ export class SyncEngine {
 		if (this.isConfig(path)) {
 			const adapter = this.vault.adapter;
 			const parts = path.split("/").slice(0, -1);
-			for (let i = 1; i <= parts.length; i++) {
-				const dir = parts.slice(0, i).join("/");
-				if (!(await adapter.exists(dir))) await adapter.mkdir(dir);
-			}
+			for (let i = 1; i <= parts.length; i++) await mkdirSafe(adapter, parts.slice(0, i).join("/"));
 			await adapter.writeBinary(path, data);
 			return;
 		}
@@ -1029,7 +1194,7 @@ export class SyncEngine {
 
 	private async writeBaseText(path: string, text: string) {
 		const adapter = this.vault.adapter;
-		if (!(await adapter.exists(this.baseDir))) await adapter.mkdir(this.baseDir);
+		await mkdirSafe(adapter, this.baseDir);
 		await adapter.write(this.baseTextPath(path), text);
 	}
 

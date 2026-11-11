@@ -332,6 +332,61 @@ export class DriveClient {
 		}
 	}
 
+	/** Starting point for listChanges(): changes after this moment are reported. */
+	async startPageToken(): Promise<string> {
+		const res = await this.request({ url: `${API}/changes/startPageToken?fields=startPageToken` });
+		const token = safeJson(res).startPageToken;
+		if (typeof token !== "string" || !token) throw new DriveError("Unerwartete Antwort von Google Drive (Änderungen).", res.status, "unexpected");
+		return token;
+	}
+
+	/**
+	 * Only what changed since `token` (instead of listing every file): files that
+	 * are new or changed in the sync folder, and ids of files that were removed,
+	 * trashed or moved out of it.
+	 */
+	async listChanges(token: string, folderId: string): Promise<{ changed: RemoteEntry[]; removed: string[]; token: string }> {
+		const changed = new Map<string, RemoteEntry>();
+		const removed = new Set<string>();
+		let page = token;
+		for (;;) {
+			const url =
+				`${API}/changes?pageToken=${encodeURIComponent(page)}&pageSize=1000&spaces=drive&includeRemoved=true` +
+				`&fields=${encodeURIComponent(`nextPageToken,newStartPageToken,changes(fileId,removed,file(${FILE_FIELDS},parents,trashed,mimeType))`)}`;
+			const json = safeJson(await this.request({ url }));
+			if (!Array.isArray(json.changes)) throw new DriveError("Unerwartete Antwort von Google Drive (Änderungen).", 502, "unexpected");
+			for (const c of json.changes) {
+				if (typeof c?.fileId !== "string") continue;
+				const f = c.file;
+				const inFolder =
+					!c.removed && f && !f.trashed && f.mimeType !== FOLDER_MIME && Array.isArray(f.parents) && f.parents.includes(folderId);
+				let entry: RemoteEntry | null = null;
+				if (inFolder) {
+					try {
+						entry = toEntry(f);
+					} catch {
+						entry = null; // invalid id or name: treat like "not in the folder"
+					}
+				}
+				// The last change of a file in the list counts.
+				if (entry) {
+					changed.set(c.fileId, entry);
+					removed.delete(c.fileId);
+				} else {
+					changed.delete(c.fileId);
+					removed.add(c.fileId);
+				}
+			}
+			if (typeof json.newStartPageToken === "string" && json.newStartPageToken) {
+				return { changed: [...changed.values()], removed: [...removed], token: json.newStartPageToken };
+			}
+			if (typeof json.nextPageToken !== "string" || !json.nextPageToken) {
+				throw new DriveError("Unerwartete Antwort von Google Drive (Änderungen).", 502, "unexpected");
+			}
+			page = json.nextPageToken;
+		}
+	}
+
 	async listFiles(folderId: string): Promise<RemoteEntry[]> {
 		const out: RemoteEntry[] = [];
 		const query = `'${q(folderId)}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`;

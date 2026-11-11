@@ -170,7 +170,7 @@ test("Sync: Speicher voll stoppt nur die Uploads, Downloads laufen weiter", asyn
   let uploads = 0;
   drive.upload = async () => { uploads++; throw new DriveError("Speicher voll", 403, "quota", "sync", "storageQuotaExceeded"); };
   const r = await b.sync();
-  assert.equal(uploads, 1, "nach dem ersten Fehler kein weiterer Upload-Versuch");
+  assert.ok(uploads <= 4, `nach dem ersten Fehler kein weiterer Upload-Versuch (nur die bereits parallel laufenden: ${uploads})`);
   assert.equal(b.vault.text("von-a.md"), "A");
   assert.equal(r.errors.length, 1);
   assert.match(r.errors[0], /5 Datei\(en\) nicht hochgeladen/);
@@ -184,7 +184,8 @@ test("Sync: Fehler, die alles betreffen, brechen ab; Fehler einer Datei nicht", 
   let uploads = 0;
   drive.upload = async () => { uploads++; throw new DriveError("Anmeldung ungültig", 401, "auth", "sync"); };
   const e = await fails(a.sync());
-  assert.deepEqual([e.kind, uploads], ["auth", 1]);
+  assert.equal(e.kind, "auth");
+  assert.ok(uploads <= 4, `höchstens die parallel gestarteten Uploads (${uploads})`);
   uploads = 0;
   drive.upload = async (...args: Parameters<typeof real>) => {
     if (++uploads === 2) throw new DriveError("zu groß", 413, "tooLarge", "file");

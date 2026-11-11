@@ -270,6 +270,23 @@ iOS-Einstellungen → Obsidian → „Aus anderen Apps einfügen“ → „Erlau
 - Die Statusleiste unten zeigt den Zustand (`☁ ✓ vor 2 Min.`). Ein Klick darauf synchronisiert sofort.
 - Befehl: *„Jetzt mit Google Drive synchronisieren“* (auch per Tastenkürzel belegbar).
 
+## Große Vaults
+
+- **Nur Änderungen abfragen:** Statt bei jeder Synchronisierung alle Dateien in Google Drive
+  aufzulisten (bei 10 000 Dateien 10 Anfragen und mehrere MB), fragt das Plugin nur, was sich
+  seit dem letzten Mal geändert hat (Änderungsliste von Google Drive). Vollständig aufgelistet
+  wird beim ersten Lauf, bei jeder **manuellen** Synchronisierung, nach Fehlern und spätestens
+  stündlich. Funktioniert die Änderungsliste nicht, wird automatisch immer alles aufgelistet.
+- **4 Übertragungen gleichzeitig.** Löschungen und Konflikte laufen weiter nacheinander.
+- **Jede Datei wird nur einmal gelesen:** Kleine Dateien (bis 1 MB, zusammen bis 32 MB), die
+  für die Prüfsumme gelesen wurden, werden für den Upload im selben Lauf wiederverwendet, sofern
+  sie sich nicht geändert haben.
+- Der Sync-Stand wird während eines Laufs höchstens alle 10 Sekunden gespeichert (vorher nach
+  jeder 25. Datei).
+- Beim Einlesen bekommt Obsidian alle 200 Dateien kurz Zeit für die Oberfläche, damit die App
+  (vor allem auf dem Handy) nicht einfriert. Die Statusleiste zeigt den Fortschritt.
+- Unveränderte Dateien werden anhand von Änderungszeit und Größe erkannt und nicht neu gelesen.
+
 ## Geräte mit unterschiedlichen Plugin-Versionen
 
 Notizen und Anhänge lassen sich zwischen allen Versionen ab 1.1.2 synchronisieren; das Format in

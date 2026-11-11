@@ -6,6 +6,14 @@ import { MAX_TEXT_BYTES } from "../src/sync";
 import { setRequestHandler } from "./obsidian-mock";
 import { FakeDrive, FakeVault, buf, device } from "./fakes";
 
+/** Runs `fn` once right after the next listing of Drive (full list or change feed). */
+function afterListing(drive: FakeDrive, fn: () => void) {
+  const list = drive.listFiles.bind(drive), changes = drive.listChanges.bind(drive);
+  const restore = () => { drive.listFiles = list; drive.listChanges = changes; };
+  drive.listFiles = async () => { const out = await list(); restore(); fn(); return out; };
+  drive.listChanges = async (t: string) => { const out = await changes(t); restore(); fn(); return out; };
+}
+
 test("Q-Injection: Werte können die Suchanfrage nicht verlassen", () => {
   assert.equal(q("Obsidian – Vault"), "Obsidian – Vault");
   assert.equal(q("a' or name contains '"), "a\\' or name contains \\'");
@@ -71,14 +79,10 @@ test("Optimistic Concurrency: Änderung eines anderen Geräts zwischen Liste und
   await a.sync(); await b.sync();
   a.vault.set("n.md", buf("1 Laptop\n2\n3\n4\n5"));
   // Das Handy lädt seine Änderung hoch, genau nachdem der Laptop die Liste gelesen hat.
-  const list = drive.listFiles.bind(drive);
-  drive.listFiles = async () => {
-    const out = await list();
+  afterListing(drive, () => {
     const [id, f] = [...drive.files.entries()][0];
     drive.files.set(id, { ...f, data: buf("1\n2\n3\n4\n5 Handy"), device: "Handy" });
-    drive.listFiles = list;
-    return out;
-  };
+  });
   const r = await a.sync();
   const expected = "1 Laptop\n2\n3\n4\n5 Handy";
   assert.equal(a.vault.text("n.md"), expected, "Laptop hat die Handy-Änderung übernommen");
@@ -93,14 +97,10 @@ test("Optimistic Concurrency: geänderte Datei wird nicht gelöscht", async () =
   await a.sync(); await b.sync();
   a.vault.remove("n.md");
   // Das Handy ändert die Notiz, während der Laptop gerade löschen will.
-  const list = drive.listFiles.bind(drive);
-  drive.listFiles = async () => {
-    const out = await list();
+  afterListing(drive, () => {
     const [id, f] = [...drive.files.entries()][0];
     drive.files.set(id, { ...f, data: buf("v2 vom Handy") });
-    drive.listFiles = list;
-    return out;
-  };
+  });
   await a.sync();
   assert.equal([...drive.files.values()].filter((f) => f.trashed).length, 0, "nicht gelöscht");
   await a.sync();

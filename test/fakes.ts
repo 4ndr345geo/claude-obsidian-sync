@@ -16,6 +16,35 @@ export class FakeDrive {
   folderGone = false; failUpload = false; corruptDownload = false; folders = 0;
   async ensureFolder() { this.folders++; this.folderGone = false; return "folder" + this.folders; }
   async folderUsable() { return !this.folderGone; }
+  /** Change feed like Google's: a token stands for a snapshot; changes = difference to now. */
+  supportsChanges = true;
+  private snapshots = new Map<string, Map<string, string>>();
+  private snap() {
+    const m = new Map<string, string>();
+    for (const [id, f] of this.files) if (!f.trashed) m.set(id, `${f.path}|${SparkMD5.ArrayBuffer.hash(f.data)}|${f.modifiedTime}`);
+    const token = `t${this.snapshots.size + 1}`;
+    this.snapshots.set(token, m);
+    return token;
+  }
+  async startPageToken() {
+    if (!this.supportsChanges) throw new Error("changes not supported");
+    return this.snap();
+  }
+  async listChanges(token: string) {
+    if (!this.supportsChanges) throw new Error("changes not supported");
+    const old = this.snapshots.get(token);
+    if (!old) throw new Error("unknown token");
+    const next = this.snap();
+    const now = this.snapshots.get(next)!;
+    const changed: RemoteEntry[] = [], removed: string[] = [];
+    for (const [id, v] of now) if (old.get(id) !== v) changed.push(this.entry(id));
+    for (const id of old.keys()) if (!now.has(id)) removed.push(id);
+    return { changed, removed, token: next };
+  }
+  private entry(id: string): RemoteEntry {
+    const f = this.files.get(id)!;
+    return { id, path: f.path, md5: SparkMD5.ArrayBuffer.hash(f.data), modifiedTime: f.modifiedTime, device: f.device, size: f.data.byteLength };
+  }
   async listFiles(): Promise<RemoteEntry[]> {
     return [...this.files.entries()].filter(([, f]) => !f.trashed).map(([id, f]) => ({
       id, path: f.path, md5: SparkMD5.ArrayBuffer.hash(f.data), modifiedTime: f.modifiedTime, device: f.device, size: f.data.byteLength }));

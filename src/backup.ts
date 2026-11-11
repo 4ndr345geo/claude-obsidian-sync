@@ -118,7 +118,12 @@ export class BackupStore {
 		const parts = path.split("/");
 		for (let i = 1; i <= parts.length; i++) {
 			const d = parts.slice(0, i).join("/");
-			if (!(await this.adapter.exists(d))) await this.adapter.mkdir(d);
+			if (await this.adapter.exists(d)) continue;
+			try {
+				await this.adapter.mkdir(d);
+			} catch (e) {
+				if (!(await this.adapter.exists(d))) throw e; // created in parallel: fine
+			}
 		}
 	}
 
