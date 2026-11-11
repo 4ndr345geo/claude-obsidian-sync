@@ -119,6 +119,27 @@ die Zahlen und fragt nach Bestätigung.
 - Dateinamen und Fehlertexte von außen erscheinen im Sync-Protokoll als Code, damit darüber keine
   Links, Bilder oder HTML in die Notiz gelangen.
 
+**Antworten von Google werden einzeln ausgewertet** (`src/http.ts`):
+
+| Antwort | Bedeutung | Reaktion |
+|---|---|---|
+| keine Verbindung | offline | automatische Synchronisierung wartet still |
+| 400 | Anfrage abgelehnt | nur diese Datei schlägt fehl |
+| 401 | Zugriffstoken abgelaufen | einmal neues Token holen, sonst „neu verbinden“ |
+| 403 `storageQuotaExceeded` | Speicher voll | keine weiteren Uploads, Downloads laufen weiter |
+| 403 `rateLimitExceeded` u. ä., 429 | zu viele Anfragen | bis zu 6 Versuche, `Retry-After` wird beachtet |
+| 403 `accessNotConfigured`, `domainPolicy` | API aus oder gesperrt | Abbruch mit Hinweis |
+| 403 sonst | keine Berechtigung | nur diese Datei schlägt fehl |
+| 404, 410 | Datei nicht mehr da | nur diese Datei, nächster Lauf prüft neu |
+| 409, 412 | gleichzeitig geändert | nur diese Datei, nächster Lauf prüft neu |
+| 413 | Datei zu groß | nur diese Datei schlägt fehl |
+| 408, 500, 502, 503, 504 | Google gestört | bis zu 6 Versuche, dann Abbruch |
+| Anmeldung `invalid_grant` | Zugang widerrufen oder abgelaufen | automatische Synchronisierung pausiert, „neu verbinden“ |
+| Anmeldung `invalid_client` | Client-ID oder Secret falsch | wie oben |
+
+Ein Fehler, der länger anhält, wird bei der automatischen Synchronisierung nur einmal gemeldet
+und protokolliert, nicht alle zwei Minuten.
+
 **„Community-Plugins synchronisieren“ überträgt Programmcode.** Wer in deinen Drive-Ordner
 schreiben kann, kann damit Code auf allen Geräten ausführen. Die Option ist standardmäßig aus; nur
 einschalten, wenn dein Google-Konto gut geschützt ist (2-Faktor-Anmeldung).
@@ -242,6 +263,7 @@ Aufbau:
 - `src/merge.ts`: 3-Wege-Merge mit Markdown-gerechter Markierung kritischer Stellen
 - `src/sync.ts`: führt den Plan aus
 - `src/drive.ts`: Google Drive API (v3)
+- `src/http.ts`: Auswertung der HTTP-Statuscodes (Wiederholen, Abbrechen, Meldung)
 - `src/auth.ts`: Google-Anmeldung (OAuth mit PKCE) und Verbindungscode
 - `src/config.ts`: welche Dateien aus `.obsidian` synchronisiert werden
 - `src/paths.ts`: Prüfung von Pfaden und Namen aus Google Drive

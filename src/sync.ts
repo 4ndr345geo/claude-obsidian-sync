@@ -1,6 +1,6 @@
 import { App, normalizePath, TFile, TFolder } from "obsidian";
 import SparkMD5 from "spark-md5";
-import { DriveClient } from "./drive";
+import { DriveClient, DriveError } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
 import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
 import { isSafeSyncPath } from "./paths";
@@ -217,7 +217,15 @@ export class SyncEngine {
 			recordEvents(result, before, dup.path, false);
 		}
 
+		// Storage full: uploads are pointless, but downloads and deletions still work.
+		let uploadsBlocked: DriveError | null = null;
+		let skippedUploads = 0;
+
 		for (const action of plan.actions) {
+			if (uploadsBlocked && (action.type === "upload" || action.type === "conflict")) {
+				skippedUploads++;
+				continue;
+			}
 			try {
 				if (action.type !== "setBase" && action.type !== "dropBase") {
 					done++;
@@ -230,10 +238,26 @@ export class SyncEngine {
 					recordEvents(result, before, action.path, action.type === "deleteLocal");
 				}
 			} catch (e) {
+				if (e instanceof DriveError && e.kind === "quota") {
+					uploadsBlocked = e;
+					skippedUploads++;
+					continue;
+				}
+				// Problems that concern everything (login, no connection, Google down,
+				// rate limit): stop instead of failing once per file.
+				if (e instanceof DriveError && e.scope === "sync") {
+					await this.persist();
+					throw e;
+				}
 				result.errors.push(`${action.path}: ${(e as Error).message}`);
 				result.events.push({ kind: "error", path: action.path, detail: (e as Error).message });
 			}
 			if (done % 25 === 0) await this.persist();
+		}
+		if (uploadsBlocked) {
+			const msg = `${uploadsBlocked.message} – ${skippedUploads} Datei(en) nicht hochgeladen`;
+			result.errors.unshift(msg);
+			result.events.push({ kind: "error", path: "Google Drive", detail: msg });
 		}
 
 		// Forget cache entries for files that are gone or no longer synchronised.

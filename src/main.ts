@@ -77,6 +77,10 @@ export default class DriveSyncPlugin extends Plugin {
 	/** The user confirmed the deletions for the next run only. */
 	private massDeleteConfirmed = false;
 	private offline = false;
+	/** Login no longer valid: automatic syncs pause until the user reconnects or syncs manually. */
+	private authBroken = false;
+	/** Last error shown for an automatic sync – the same error is not reported every two minutes. */
+	private lastReported = "";
 
 	async onload() {
 		await this.loadAll();
@@ -193,7 +197,8 @@ export default class DriveSyncPlugin extends Plugin {
 			return;
 		}
 		// A stopped sync waits for the user; a manual sync checks again from scratch.
-		if (this.massDelete && !manual) return;
+		if ((this.massDelete || this.authBroken) && !manual) return;
+		this.authBroken = false;
 		this.massDelete = null;
 		const allowMassDelete = this.massDeleteConfirmed;
 		this.massDeleteConfirmed = false;
@@ -208,6 +213,7 @@ export default class DriveSyncPlugin extends Plugin {
 			}, allowMassDelete);
 			this.lastSync = Date.now();
 			this.lastError = result.errors[0] ?? "";
+			if (!this.lastError) this.lastReported = "";
 			this.report(result, manual);
 			await this.writeLog(start, result, null);
 		} catch (e) {
@@ -233,7 +239,11 @@ export default class DriveSyncPlugin extends Plugin {
 				this.offline = true;
 				return;
 			} else {
-				new Notice(`Google Drive Sync: ${this.lastError}`, 8000);
+				if (e instanceof DriveError && (e.kind === "auth" || e.kind === "blocked")) this.authBroken = true;
+				// A lasting problem (Google down, rate limit …) is reported once, not on every attempt.
+				if (!manual && this.lastError === this.lastReported) return;
+				this.lastReported = this.lastError;
+				new Notice(`Google Drive Sync: ${this.lastError}`, this.authBroken ? 0 : 8000);
 			}
 			await this.writeLog(start, null, this.lastError);
 		} finally {
@@ -397,6 +407,11 @@ export default class DriveSyncPlugin extends Plugin {
 		if (this.massDelete) {
 			this.statusEl.setText("☁ ⚠ Bestätigung nötig");
 			this.statusEl.setAttr("aria-label", this.massDelete.message);
+			return;
+		}
+		if (this.authBroken) {
+			this.statusEl.setText("☁ ⚠ neu verbinden");
+			this.statusEl.setAttr("aria-label", this.lastError);
 			return;
 		}
 		if (this.offline) {

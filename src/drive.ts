@@ -1,4 +1,5 @@
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from "obsidian";
+import { backoffMs, classifyDrive, classifyToken, ErrorKind, ErrorScope, HttpVerdict, isSuccess, MAX_ATTEMPTS, retryAfterMs } from "./http";
 import { cleanDeviceName } from "./paths";
 import type { RemoteEntry } from "./plan";
 
@@ -16,12 +17,26 @@ export interface Credentials {
 }
 
 export class DriveError extends Error {
-	/** @param status HTTP status; 0 = Google could not be reached at all (offline) */
-	constructor(message: string, public status: number) {
+	/**
+	 * @param status HTTP status; 0 = Google could not be reached at all (offline)
+	 * @param kind   what went wrong (see http.ts)
+	 * @param scope  "file": only this file failed; "sync": the whole run has to stop
+	 * @param reason Google's own reason code, e.g. "storageQuotaExceeded" or "invalid_grant"
+	 */
+	constructor(
+		message: string,
+		public status: number,
+		public kind: ErrorKind = status === 0 ? "offline" : "unexpected",
+		public scope: ErrorScope = "sync",
+		public reason = ""
+	) {
 		super(message);
 	}
 	get offline(): boolean {
-		return this.status === 0;
+		return this.kind === "offline";
+	}
+	static from(v: HttpVerdict, status: number, reason: string): DriveError {
+		return new DriveError(v.message, status, v.kind, v.scope, reason);
 	}
 }
 
@@ -43,8 +58,10 @@ function safeJson(res: RequestUrlResponse): any {
 	}
 }
 
-/** Google uses 403 both for "slow down" (retry) and for permanent problems (do not retry). */
-const RETRY_403 = new Set(["rateLimitExceeded", "userRateLimitExceeded", "sharingRateLimitExceeded"]);
+function header(res: RequestUrlResponse, name: string): string | undefined {
+	const h = res.headers ?? {};
+	return h[name] ?? h[name.toLowerCase()];
+}
 
 function sleep(ms: number) {
 	return new Promise((r) => setTimeout(r, ms));
@@ -58,40 +75,40 @@ export class DriveClient {
 	private accessToken = "";
 	private expiresAt = 0;
 
-	constructor(private creds: () => Credentials) {}
+	/** @param pause waiting between attempts (replaceable for tests) */
+	constructor(private creds: () => Credentials, private pause: (ms: number) => Promise<unknown> = sleep) {}
 
 	private async token(): Promise<string> {
 		if (this.accessToken && Date.now() < this.expiresAt - 60_000) return this.accessToken;
 		const c = this.creds();
-		if (!c.refreshToken) throw new DriveError("Nicht mit Google Drive verbunden.", 401);
-		const res = await send({
-			url: TOKEN_URL,
-			method: "POST",
-			contentType: "application/x-www-form-urlencoded",
-			body: new URLSearchParams({
-				client_id: c.clientId,
-				client_secret: c.clientSecret,
-				refresh_token: c.refreshToken,
-				grant_type: "refresh_token",
-			}).toString(),
-		});
-		if (res.status === 400 || res.status === 401) {
-			// invalid_grant / invalid_client: the access was revoked or has expired.
-			throw new DriveError(
-				`Anmeldung bei Google fehlgeschlagen (${res.status}). Bitte in den Einstellungen neu verbinden.`,
-				res.status
-			);
-		}
-		if (res.status !== 200) {
-			throw new DriveError(
-				`Die Google-Anmeldung ist gerade nicht erreichbar (${res.status}). Es wird später erneut versucht.`,
-				res.status
-			);
+		if (!c.refreshToken) throw new DriveError("Nicht mit Google Drive verbunden.", 401, "auth");
+		let res: RequestUrlResponse;
+		for (let attempt = 0; ; attempt++) {
+			res = await send({
+				url: TOKEN_URL,
+				method: "POST",
+				contentType: "application/x-www-form-urlencoded",
+				body: new URLSearchParams({
+					client_id: c.clientId,
+					client_secret: c.clientSecret,
+					refresh_token: c.refreshToken,
+					grant_type: "refresh_token",
+				}).toString(),
+			});
+			if (isSuccess(res.status)) break;
+			const error = String(safeJson(res).error ?? "");
+			const verdict = classifyToken(res.status, error);
+			// Few attempts only: the token endpoint must not be hammered.
+			if (verdict.retry && attempt < 2) {
+				await this.pause(backoffMs(attempt, retryAfterMs(header(res, "Retry-After"))));
+				continue;
+			}
+			throw DriveError.from(verdict, res.status, error);
 		}
 		const json = safeJson(res);
 		const accessToken = json.access_token;
 		if (typeof accessToken !== "string" || !accessToken) {
-			throw new DriveError("Unerwartete Antwort von der Google-Anmeldung.", 502);
+			throw new DriveError("Unerwartete Antwort von der Google-Anmeldung.", res.status, "unexpected");
 		}
 		this.accessToken = accessToken;
 		this.expiresAt = Date.now() + (Number(json.expires_in) || 3600) * 1000;
@@ -99,27 +116,29 @@ export class DriveClient {
 	}
 
 	private async request(params: RequestUrlParam): Promise<RequestUrlResponse> {
+		let refreshed = false;
 		for (let attempt = 0; ; attempt++) {
 			const token = await this.token();
 			const res = await send({
 				...params,
 				headers: { ...(params.headers ?? {}), Authorization: `Bearer ${token}` },
 			});
-			if (res.status >= 200 && res.status < 400) return res;
-			if (res.status === 401 && attempt === 0) {
+			if (isSuccess(res.status)) return res;
+			const error = safeJson(res).error ?? {};
+			const reason = String(error.errors?.[0]?.reason ?? "");
+			const detail = typeof error.message === "string" ? error.message.slice(0, 300) : "";
+			const verdict = classifyDrive(res.status, reason, detail);
+			// 401: the access token may simply have expired early – get a new one, once.
+			if (verdict.kind === "auth" && !refreshed) {
+				refreshed = true;
 				this.accessToken = "";
 				continue;
 			}
-			const error = safeJson(res).error ?? {};
-			const reason = String(error.errors?.[0]?.reason ?? "");
-			const retryable =
-				res.status === 429 || res.status >= 500 || (res.status === 403 && RETRY_403.has(reason));
-			if (retryable && attempt < 5) {
-				await sleep(1000 * 2 ** attempt + Math.random() * 500);
+			if (verdict.retry && attempt < MAX_ATTEMPTS - 1) {
+				await this.pause(backoffMs(attempt, retryAfterMs(header(res, "Retry-After"))));
 				continue;
 			}
-			const detail = typeof error.message === "string" ? error.message.slice(0, 300) : "";
-			throw new DriveError(`Google Drive Fehler ${res.status}: ${detail}`, res.status);
+			throw DriveError.from(verdict, res.status, reason);
 		}
 	}
 
@@ -161,7 +180,7 @@ export class DriveClient {
 			const f = safeJson(res);
 			return f.id === folderId && f.trashed === false && f.mimeType === FOLDER_MIME;
 		} catch (e) {
-			if (e instanceof DriveError && e.status === 404) return false;
+			if (e instanceof DriveError && e.kind === "notFound") return false;
 			throw e;
 		}
 	}
@@ -185,7 +204,7 @@ export class DriveClient {
 				page = null;
 			}
 			if (!page || !Array.isArray(page.files)) {
-				throw new DriveError("Unerwartete Antwort von Google Drive (Dateiliste).", 502);
+				throw new DriveError("Unerwartete Antwort von Google Drive (Dateiliste).", res.status, "unexpected");
 			}
 			for (const f of page.files) out.push(toEntry(f));
 			pageToken = typeof page.nextPageToken === "string" ? page.nextPageToken : "";
@@ -233,7 +252,7 @@ export class DriveClient {
 			contentType: "application/json; charset=UTF-8",
 			body: JSON.stringify(metadata),
 		});
-		const location = init.headers["location"] ?? init.headers["Location"];
+		const location = header(init, "Location");
 		// The access token is sent to this address, so it has to be Google's.
 		if (!location || !location.startsWith(UPLOAD + "/")) {
 			throw new DriveError("Upload-Sitzung konnte nicht gestartet werden.", 500);
