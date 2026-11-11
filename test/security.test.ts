@@ -131,3 +131,41 @@ test("Schlüsselbund: Werte werden nur als gespeichert gemeldet, wenn sie zurüc
   assert.equal(old.available, false);
   assert.equal(old.set("refresh-token", "x"), false);
 });
+
+test("Sicherheitsstopp: „Behalten und wiederherstellen“ lädt alles wieder hoch statt zu löschen", async () => {
+  const drive = new FakeDrive();
+  const a = device(drive, "Laptop");
+  for (let i = 0; i < 30; i++) a.vault.set(`n${i}.md`, buf(`Notiz ${i}`));
+  await a.sync();
+  for (const f of drive.files.values()) f.trashed = true;
+  const err = await a.sync().then(() => null, (e) => e);
+  assert.ok(err instanceof MassDeleteError);
+  assert.equal(err.paths.length, 30);
+  await a.engine.keepInsteadOfDelete(err.paths);
+  const r = await a.sync();
+  assert.deepEqual([r.uploaded, r.deleted], [30, 0]);
+  assert.equal(a.vault.data.size, 30);
+});
+
+test("Sicherheitsstopp für Einstellungsdateien ab 10 Dateien, darunter normales Löschen", async () => {
+  const drive = new FakeDrive();
+  const a = device(drive, "Laptop", true), b = device(drive, "Handy", true);
+  for (let i = 0; i < 4; i++) for (const f of ["main.js", "manifest.json", "styles.css"]) a.vault.setHidden(`.obsidian/plugins/p${i}/${f}`, f);
+  for (let i = 0; i < 40; i++) a.vault.set(`n${i}.md`, buf(`${i}`));
+  await a.sync(); await b.sync();
+  // ein Plugin deinstalliert: 3 Dateien – kein Stopp
+  for (const f of ["main.js", "manifest.json", "styles.css"]) a.vault.hidden.delete(`.obsidian/plugins/p0/${f}`);
+  await a.sync();
+  assert.equal((await b.sync()).deleted, 3);
+  // drei weitere auf einmal: 9 Dateien – kein Stopp
+  for (let i = 1; i < 4; i++) for (const f of ["main.js", "manifest.json", "styles.css"]) b.vault.hidden.delete(`.obsidian/plugins/p${i}/${f}`);
+  assert.equal((await b.sync()).deleted, 9);
+  // 10 Snippets auf einmal gelöscht: Stopp
+  for (let i = 0; i < 10; i++) a.vault.setHidden(`.obsidian/snippets/s${i}.css`, "x");
+  await a.sync(); await b.sync();
+  for (let i = 0; i < 10; i++) b.vault.hidden.delete(`.obsidian/snippets/s${i}.css`);
+  const err = await b.sync().then(() => null, (e) => e);
+  assert.ok(err instanceof MassDeleteError && err.config);
+  assert.deepEqual([err.local, err.remote], [0, 10]);
+  assert.equal([...drive.files.values()].filter((f) => f.trashed && f.path.includes("snippets")).length, 0);
+});

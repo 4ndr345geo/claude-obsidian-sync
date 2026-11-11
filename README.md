@@ -198,6 +198,12 @@ ganzen Lauf ab, siehe Tabelle.
 Ein Fehler, der länger anhält, wird bei der automatischen Synchronisierung nur einmal gemeldet
 und protokolliert, nicht alle zwei Minuten.
 
+**Sicherheitsstopp für Einstellungsdateien.** Würden in einem Lauf 10 oder mehr Dateien aus
+`.obsidian` gelöscht (Plugins, Themes, Snippets; eine einzelne Deinstallation sind etwa 2–4
+Dateien), fragt das Plugin vorher nach. Zur Wahl stehen „Löschen“, „Abbrechen“ und
+**„Behalten und wiederherstellen“**: Dann wird nichts gelöscht, und was auf einer Seite fehlt,
+wird von der anderen wieder übertragen. Dieselbe Wahl gibt es beim allgemeinen Sicherheitsstopp.
+
 **„Community-Plugins synchronisieren“ überträgt Programmcode.** Wer in deinen Drive-Ordner
 schreiben kann, kann damit Code auf allen Geräten ausführen. Die Option ist standardmäßig aus; nur
 einschalten, wenn dein Google-Konto gut geschützt ist (2-Faktor-Anmeldung).
@@ -263,6 +269,22 @@ iOS-Einstellungen → Obsidian → „Aus anderen Apps einfügen“ → „Erlau
 - Umbenennen wird als „alte Datei löschen + neue anlegen“ übertragen.
 - Die Statusleiste unten zeigt den Zustand (`☁ ✓ vor 2 Min.`). Ein Klick darauf synchronisiert sofort.
 - Befehl: *„Jetzt mit Google Drive synchronisieren“* (auch per Tastenkürzel belegbar).
+
+## Geräte mit unterschiedlichen Plugin-Versionen
+
+Notizen und Anhänge lassen sich zwischen allen Versionen ab 1.1.2 synchronisieren; das Format in
+Google Drive ist seitdem unverändert. Ein Test (`test/compat.test.ts`) lässt bei jedem Release
+die Sync-Logik der Versionen 1.1.2, 1.2.0, 1.4.0 und 1.5.1 gegen die aktuelle laufen.
+
+**Ausnahme Einstellungs-Sync:** Versionen **vor 1.3.0** kennen ihn nicht. Sie laden die
+`.obsidian`-Dateien der anderen Geräte wie Notizen herunter und löschen sie danach in Google
+Drive. Deshalb **erst alle Geräte aktualisieren** (Einstellungen des Plugins zeigen ganz oben
+„Installierte Version“), dann den Einstellungs-Sync einschalten. Ist es schon passiert, schützt
+ab 10 Dateien der Sicherheitsstopp; „Behalten und wiederherstellen“ lädt die Dateien wieder hoch.
+Darunter werden sie gelöscht, liegen aber in `.obsidian/sync-history`.
+
+Ein Wechsel von 1.5.0 oder neuer zurück auf eine ältere Version trennt die Verbindung (die
+Zugangsdaten liegen dann im Schlüsselbund); danach einfach neu verbinden.
 
 ## Einstellungen, Themes und Plugins synchronisieren
 

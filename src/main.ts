@@ -284,9 +284,10 @@ export default class DriveSyncPlugin extends Plugin {
 				this.massDelete = e;
 				if (manual) {
 					progress?.hide();
-					void confirmMassDelete(this.app, e).then((yes) => {
-						if (!yes) return;
-						this.massDeleteConfirmed = true;
+					void confirmMassDelete(this.app, e).then(async (answer) => {
+						if (answer === "cancel") return;
+						if (answer === "keep") await this.engine.keepInsteadOfDelete(e.paths);
+						else this.massDeleteConfirmed = true;
 						void this.sync(true);
 					});
 				} else {
@@ -1135,18 +1136,28 @@ class DriveSyncSettingTab extends PluginSettingTab {
 	}
 }
 
-function confirmMassDelete(app: App, e: MassDeleteError): Promise<boolean> {
+/** Asks what to do after a safety stop: delete, keep (and copy back), or nothing for now. */
+function confirmMassDelete(app: App, e: MassDeleteError): Promise<"delete" | "keep" | "cancel"> {
 	return new Promise((resolve) => {
-		let answer = false;
+		let answer: "delete" | "keep" | "cancel" = "cancel";
 		const m = new Modal(app);
-		m.titleEl.setText("Viele Dateien löschen?");
+		m.titleEl.setText(e.config ? "Viele Einstellungsdateien löschen?" : "Viele Dateien löschen?");
 		m.contentEl.createEl("p", { text: e.message });
 		m.contentEl.createEl("p", {
 			cls: "setting-item-description",
+			text: e.config
+				? "Richtig, wenn du auf einem Gerät mehrere Plugins oder Themes deinstalliert hast. Falsch, wenn auf einem " +
+					"anderen Gerät noch eine Plugin-Version vor 1.3.0 läuft – sie löscht Einstellungsdateien irrtümlich in " +
+					"Google Drive. Dann dort zuerst das Plugin aktualisieren (Einstellungen zeigen „Installierte Version“) " +
+					"und hier „Behalten“ wählen."
+				: "Das passiert z. B., wenn der Ordner in Google Drive geleert oder ersetzt wurde oder der Vault auf diesem " +
+					"Gerät nicht vollständig geladen ist. Nur löschen, wenn du die Dateien wirklich gelöscht hast.",
+		});
+		m.contentEl.createEl("p", {
+			cls: "setting-item-description",
 			text:
-				"Das passiert z. B., wenn der Ordner in Google Drive geleert oder ersetzt wurde oder der Vault auf diesem " +
-				"Gerät nicht vollständig geladen ist. Nur fortfahren, wenn du die Dateien wirklich gelöscht hast. " +
-				"Im Zweifel abbrechen und den Ordner in Google Drive (auch den Papierkorb) prüfen.",
+				"„Behalten und wiederherstellen“: Nichts wird gelöscht. Was auf einer Seite fehlt, wird von der anderen " +
+				"wieder übertragen. Gelöschte Dateien liegen außerdem in .obsidian/sync-history.",
 		});
 		new Setting(m.contentEl)
 			.addButton((b) => {
@@ -1155,10 +1166,19 @@ function confirmMassDelete(app: App, e: MassDeleteError): Promise<boolean> {
 			})
 			.addButton((b) =>
 				b
+					.setButtonText("Behalten und wiederherstellen")
+					.setCta()
+					.onClick(() => {
+						answer = "keep";
+						m.close();
+					})
+			)
+			.addButton((b) =>
+				b
 					.setButtonText(`${e.local + e.remote} Dateien löschen`)
 					.setWarning()
 					.onClick(() => {
-						answer = true;
+						answer = "delete";
 						m.close();
 					})
 			);

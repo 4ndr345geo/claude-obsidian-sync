@@ -90,13 +90,30 @@ export interface SyncResult {
 
 /** Thrown before anything is changed when a sync would delete unusually many files. */
 export class MassDeleteError extends Error {
-	constructor(public local: number, public remote: number, public total: number) {
+	/**
+	 * @param config true: the stop concerns settings files (.obsidian) – plugins, themes …
+	 */
+	/** Paths that would have been deleted (for "keep and restore") */
+	paths: string[] = [];
+
+	constructor(public local: number, public remote: number, public total: number, public config = false) {
 		super(
-			`Sicherheitsstopp: Diese Synchronisierung würde ${local + remote} von ${total} Dateien löschen ` +
-				`(${local} auf diesem Gerät, ${remote} in Google Drive). Es wurde nichts geändert.`
+			config
+				? `Sicherheitsstopp: Diese Synchronisierung würde ${local + remote} Einstellungsdateien (Plugins, Themes, ` +
+						`Einstellungen) löschen (${local} auf diesem Gerät, ${remote} in Google Drive). Es wurde nichts geändert.`
+				: `Sicherheitsstopp: Diese Synchronisierung würde ${local + remote} von ${total} Dateien löschen ` +
+						`(${local} auf diesem Gerät, ${remote} in Google Drive). Es wurde nichts geändert.`
 		);
 	}
 }
+
+/**
+ * Settings files are deleted for good (no trash), and a device with an old
+ * plugin version (before 1.3.0) can wrongly delete them in Google Drive.
+ * From this many settings files in one run on, the user is asked first.
+ * (Uninstalling one plugin deletes about 2–4 files.)
+ */
+export const CONFIG_DELETE_MIN = 10;
 
 /** A sync that deletes at least this many files … */
 export const MASS_DELETE_MIN = 20;
@@ -322,7 +339,18 @@ export class SyncEngine {
 			delLocal + delRemote >= MASS_DELETE_MIN &&
 			delLocal + delRemote >= total * MASS_DELETE_SHARE
 		) {
-			throw new MassDeleteError(delLocal, delRemote, total);
+			const err = new MassDeleteError(delLocal, delRemote, total);
+			err.paths = plan.actions.filter((a) => a.type === "deleteLocal" || a.type === "deleteRemote").map((a) => a.path);
+			throw err;
+		}
+		const cfgLocal = plan.actions.filter((a) => a.type === "deleteLocal" && this.isConfig(a.path)).length;
+		const cfgRemote = plan.actions.filter((a) => a.type === "deleteRemote" && this.isConfig(a.path)).length;
+		if (!allowMassDelete && cfgLocal + cfgRemote >= CONFIG_DELETE_MIN) {
+			const err = new MassDeleteError(cfgLocal, cfgRemote, total, true);
+			err.paths = plan.actions
+				.filter((a) => (a.type === "deleteLocal" || a.type === "deleteRemote") && this.isConfig(a.path))
+				.map((a) => a.path);
+			throw err;
 		}
 
 		for (const dup of plan.duplicates) {
@@ -933,6 +961,16 @@ export class SyncEngine {
 			if (!(await this.vault.adapter.exists(path))) throw e;
 			await this.vault.adapter.writeBinary(path, data);
 		}
+	}
+
+	/**
+	 * "Keep and restore" after a safety stop: forgets the last synced state of
+	 * these files. The next sync then sees them as new on one side and copies
+	 * them to the other side again, instead of deleting them.
+	 */
+	async keepInsteadOfDelete(paths: string[]): Promise<void> {
+		for (const p of paths) await this.forget(p);
+		await this.persist();
 	}
 
 	/**
