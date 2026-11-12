@@ -235,6 +235,14 @@ export default class DriveSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "show-synced-devices",
+			name: "Sync: Angemeldete Geräte anzeigen (Übersicht & Abmelden)",
+			callback: () => {
+				new DevicesOverviewModal(this.app, this).open();
+			},
+		});
+
 		// QR code / link from another device: obsidian://gdrive-vault-sync?code=ODS1:…
 		// Such a link can be opened by any website or app. It is therefore only
 		// accepted while this device is not connected, and never without asking.
@@ -853,6 +861,78 @@ class ConfirmConnectModal extends Modal {
 	}
 }
 
+class DevicesOverviewModal extends Modal {
+	constructor(app: App, private plugin: GoogleDriveSyncPlugin) {
+		super(app);
+	}
+	async onOpen() {
+		this.titleEl.setText("Angemeldete Geräte & Synchronisierung");
+		const { contentEl } = this;
+		contentEl.empty();
+
+		const logFolder = this.plugin.settings.folderName ? this.plugin.settings.logFolder : "Sync-Protokoll";
+		const files = this.app.vault.getFiles();
+		const logFiles = files.filter(
+			(f) => f.path.startsWith(logFolder + "/") && f.extension === "md"
+		);
+
+		contentEl.createEl("p", {
+			cls: "setting-item-description",
+			text: "Übersicht aller Geräte, die Notizen in deinen Google Drive Vault synchronisieren. Jedes Gerät schreibt in ein eigenes Protokoll.",
+		});
+
+		const currentDevice = this.plugin.settings.deviceName || "Dieses Gerät";
+
+		// Dieses Gerät
+		const thisDevEl = contentEl.createDiv({ cls: "setting-item" });
+		const thisInfo = thisDevEl.createDiv({ cls: "setting-item-info" });
+		thisInfo.createDiv({ cls: "setting-item-name", text: `💻 ${currentDevice} (Dieses Gerät)` });
+		thisInfo.createDiv({
+			cls: "setting-item-description",
+			text: `Status: ${this.plugin.isConnected() ? "Aktiv verbunden ✓" : "Nicht verbunden"} · Google Drive Ordner: ${this.plugin.settings.folderName}`,
+		});
+
+		// Erkannte andere Geräte aus Log-Dateien
+		if (logFiles.length > 0) {
+			contentEl.createEl("h4", { text: "Erkannte synchronisierende Geräte im Vault:" });
+			for (const f of logFiles) {
+				const devName = f.basename;
+				if (devName === currentDevice) continue;
+
+				const devEl = contentEl.createDiv({ cls: "setting-item" });
+				const devInfo = devEl.createDiv({ cls: "setting-item-info" });
+				devInfo.createDiv({ cls: "setting-item-name", text: `📱 ${devName}` });
+				const mtime = new Date(f.stat.mtime).toLocaleString();
+				devInfo.createDiv({
+					cls: "setting-item-description",
+					text: `Letzter Sync: ${mtime} · Protokolldatei: ${f.path}`,
+				});
+			}
+		}
+
+		new Setting(contentEl)
+			.setName("Alle Geräte abmelden")
+			.setDesc("Widerruft die Google Drive Autorisierung für alle Geräte gleichzeitig.")
+			.addButton((b) =>
+				b
+					.setButtonText("Alle Geräte abmelden")
+					.setWarning()
+					.onClick(async () => {
+						const ok = confirm(
+							"Möchtest du wirklich alle Geräte abmelden?\n\nDie Autorisierung bei Google wird widerrufen und alle verbundenen Geräte werden abgemeldet."
+						);
+						if (ok) {
+							this.close();
+							await this.plugin.disconnectAllDevices();
+						}
+					})
+			);
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
 class BackupListModal extends FuzzySuggestModal<BackupEntry> {
 	constructor(app: App, private entries: BackupEntry[], private choose: (b: BackupEntry) => void) {
 		super(app);
@@ -1038,6 +1118,15 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			);
 
 		if (p.isConnected()) {
+			new Setting(containerEl)
+				.setName("Angemeldete Geräte anzeigen")
+				.setDesc("Öffnet die Übersicht aller synchronisierenden Geräte, deren Status und letzter Sync.")
+				.addButton((b) =>
+					b.setButtonText("Geräte-Übersicht öffnen").onClick(() => {
+						new DevicesOverviewModal(this.app, p).open();
+					})
+				);
+
 			new Setting(containerEl)
 				.setName("Dieses Gerät trennen")
 				.setDesc("Trennt nur dieses einzelne Gerät von Google Drive. Andere Geräte bleiben synchronisiert.")
