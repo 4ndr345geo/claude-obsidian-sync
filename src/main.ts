@@ -6,12 +6,15 @@ import {
 	Notice,
 	Platform,
 	Plugin,
+	ItemView,
 	PluginSettingTab,
 	requestUrl,
 	Setting,
 	TAbstractFile,
 	TFile,
+	WorkspaceLeaf,
 } from "obsidian";
+import { GDriveSyncDashboardView, VIEW_TYPE_GDRIVE_SYNC } from "./dashboardView";
 import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
@@ -123,7 +126,25 @@ export default class DriveSyncPlugin extends Plugin {
 			this.manifest.id
 		);
 
+		this.registerView(
+			VIEW_TYPE_GDRIVE_SYNC,
+			(leaf) => new GDriveSyncDashboardView(leaf, this)
+		);
+
+		this.addRibbonIcon("hard-drive", "Google Drive Sync-Zentrale & Geräte", () => {
+			void this.openSyncDashboard();
+		});
+
 		this.addRibbonIcon("refresh-cw", "Mit Google Drive synchronisieren", () => this.sync(true));
+
+		this.addCommand({
+			id: "open-sync-dashboard",
+			name: "Sync: Graphische Sync-Zentrale & Geräte anzeigen",
+			callback: () => {
+				void this.openSyncDashboard();
+			},
+		});
+
 		this.addCommand({
 			id: "sync-now",
 			name: "Jetzt mit Google Drive synchronisieren",
@@ -552,6 +573,34 @@ export default class DriveSyncPlugin extends Plugin {
 		new Notice("Alle Geräte abgemeldet: Die Google Drive-Autorisierung wurde widerrufen.");
 		this.renderStatus();
 		return true;
+	}
+
+	/**
+	 * Opens or reveals the graphical sync dashboard in Obsidian workspace
+	 */
+	async openSyncDashboard() {
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(VIEW_TYPE_GDRIVE_SYNC)[0];
+		if (!leaf) {
+			const rightLeaf = workspace.getRightLeaf(false);
+			if (rightLeaf) {
+				await rightLeaf.setViewState({
+					type: VIEW_TYPE_GDRIVE_SYNC,
+					active: true,
+				});
+				leaf = rightLeaf;
+			}
+		}
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
+	}
+
+	/**
+	 * Opens pairing QR modal
+	 */
+	showQrModal() {
+		new QrModal(this.app, this.connectionCode()).open();
 	}
 
 	async openNote(path: string) {
@@ -1118,6 +1167,18 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			);
 
 		if (p.isConnected()) {
+			new Setting(containerEl)
+				.setName("Graphische Sync-Zentrale öffnen")
+				.setDesc("Öffnet das interaktive Dashboard mit Netzwerk-Topologie, aktiven Geräten und Kontrollzentrum.")
+				.addButton((b) =>
+					b
+						.setButtonText("Sync-Zentrale öffnen")
+						.setCta()
+						.onClick(() => {
+							void p.openSyncDashboard();
+						})
+				);
+
 			new Setting(containerEl)
 				.setName("Angemeldete Geräte anzeigen")
 				.setDesc("Öffnet die Übersicht aller synchronisierenden Geräte, deren Status und letzter Sync.")
