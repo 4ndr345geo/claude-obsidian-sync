@@ -911,7 +911,7 @@ class ConfirmConnectModal extends Modal {
 }
 
 class DevicesOverviewModal extends Modal {
-	constructor(app: App, private plugin: GoogleDriveSyncPlugin) {
+	constructor(app: App, private plugin: DriveSyncPlugin) {
 		super(app);
 	}
 	async onOpen() {

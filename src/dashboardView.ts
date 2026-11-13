@@ -1,14 +1,14 @@
 import { ItemView, WorkspaceLeaf, Notice, TFile } from "obsidian";
-import type GoogleDriveSyncPlugin from "./main";
+import type DriveSyncPlugin from "./main";
 import { hasConflictMarkers } from "./merge";
 
 export const VIEW_TYPE_GDRIVE_SYNC = "gdrive-sync-dashboard-view";
 
 export class GDriveSyncDashboardView extends ItemView {
-	private plugin: GoogleDriveSyncPlugin;
+	private plugin: DriveSyncPlugin;
 	private refreshTimer: number | null = null;
 
-	constructor(leaf: WorkspaceLeaf, plugin: GoogleDriveSyncPlugin) {
+	constructor(leaf: WorkspaceLeaf, plugin: DriveSyncPlugin) {
 		super(leaf);
 		this.plugin = plugin;
 	}
@@ -237,28 +237,39 @@ export class GDriveSyncDashboardView extends ItemView {
 		}
 	}
 
+	private escapeHtml(str: string): string {
+		return str
+			.replace(/&/g, "&amp;")
+			.replace(/</g, "&lt;")
+			.replace(/>/g, "&gt;")
+			.replace(/"/g, "&quot;")
+			.replace(/'/g, "&#039;");
+	}
+
 	private generateTopologySvg(
 		currentDevice: string,
 		remoteDevices: Array<{ name: string; mtime: number }>,
 		isConnected: boolean
 	): string {
-		const width = 560;
-		const height = 240;
-		const cx = width / 2;
-		const cy = 110;
-
 		// Default demo satellite devices if only local device exists
 		const satellites =
 			remoteDevices.length > 0
-				? remoteDevices.map((d, i) => ({
+				? remoteDevices.map((d) => ({
 						name: d.name,
 						isLocal: false,
-						angle: (Math.PI / (remoteDevices.length + 1)) * (i + 1) + Math.PI / 2,
 				  }))
 				: [
-						{ name: "iPhone (Muster)", isLocal: false, angle: Math.PI * 0.15 },
-						{ name: "iPad (Muster)", isLocal: false, angle: Math.PI * 0.85 },
+						{ name: "iPhone (Muster)", isLocal: false },
+						{ name: "iPad (Muster)", isLocal: false },
 				  ];
+
+		const width = 560;
+		const height = Math.max(240, satellites.length * 76 + 44);
+		const cx = width / 2;
+		const cy = height / 2 - 10;
+
+		const stepY = satellites.length > 1 ? (height - 90) / (satellites.length - 1) : 0;
+		const startY = satellites.length > 1 ? 45 : cy;
 
 		// Include local device in mesh
 		const allNodes = [
@@ -267,7 +278,7 @@ export class GDriveSyncDashboardView extends ItemView {
 				name: s.name,
 				isLocal: false,
 				x: cx + 180,
-				y: cy - 45 + idx * 90,
+				y: startY + idx * stepY,
 			})),
 		];
 
@@ -292,7 +303,7 @@ export class GDriveSyncDashboardView extends ItemView {
 				<g transform="translate(${node.x}, ${node.y})" class="gdrive-svg-node">
 					<circle r="22" fill="#1e2230" stroke="${node.isLocal ? "#a855f7" : "#475569"}" stroke-width="2" />
 					<text y="5" text-anchor="middle" font-size="14" fill="#ffffff">${node.isLocal ? "💻" : "📱"}</text>
-					<text y="38" text-anchor="middle" font-size="11" font-weight="600" fill="#cbd5e1">${node.name}</text>
+					<text y="38" text-anchor="middle" font-size="11" font-weight="600" fill="#cbd5e1">${this.escapeHtml(node.name)}</text>
 				</g>
 			`;
 		}
