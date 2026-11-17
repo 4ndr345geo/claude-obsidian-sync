@@ -87,7 +87,7 @@ test("Protokoll: Dateinamen und Fehlertexte von außen werden nicht als Markdown
     uploaded: 0, downloaded: 1, deleted: 0, merged: 0, marked: [], conflicts: [], errors: ["e"], configChanged: false,
     events: [{ kind: "down", path: evil }, { kind: "down", path: "Ordner/gute_Notiz.md" },
       { kind: "error", path: "a.md", detail: "kaputt `x` <script>alert(1)</script>\n## Überschrift" }],
-  }, "abgebrochen <b>fett</b> `c`", () => false)!;
+  }, "abgebrochen <b>fett</b> `c`", () => false, true)!;
   assert.ok(entry.includes("[[Ordner/gute_Notiz]]"));
   assert.ok(!entry.includes("[[x]]"));
   for (const line of entry.split("\n").slice(1)) {

@@ -53,11 +53,31 @@ export function code(text: string): string {
 	return `\`${clean.slice(0, 300) || " "}\``;
 }
 
-function link(path: string): string {
-	// Wiki links for notes so they can be opened from the log; plain code for everything else.
-	const plain = !/[[\]|#^<>`\\]/.test(path);
-	if (plain && path.endsWith(".md") && !path.startsWith(".")) return `[[${path.slice(0, -3)}]]`;
+function link(path: string, wikiLinks = false): string {
+	// Plain code by default so sync log files never turn devices into Graph View hubs;
+	// optional Wiki-Links if explicitly enabled in settings.
+	if (wikiLinks) {
+		const plain = !/[[\]|#^<>`\\]/.test(path);
+		if (plain && path.endsWith(".md") && !path.startsWith(".")) return `[[${path.slice(0, -3)}]]`;
+	}
 	return code(path);
+}
+
+/**
+ * Converts legacy [[Note]] Wiki-Links inside existing sync log entries into
+ * safe inline code (`Note.md`) so device logs do not pollute Obsidian's Graph View.
+ */
+export function stripLogWikiLinks(text: string): string {
+	return text.replace(
+		/^(- [^:\n]+: )\[\[([^\]\n`]+)\]\](.*)$/gm,
+		(_m, prefix: string, target: string, rest: string) => {
+			const cleanedRest = rest.replace(
+				/\(von \[\[([^\]\n`]+)\]\]\)/g,
+				(_m2: string, t2: string) => `(von ${code(t2 + ".md")})`
+			);
+			return `${prefix}${code(target + ".md")}${cleanedRest}`;
+		}
+	);
 }
 
 /**
@@ -70,7 +90,8 @@ export function formatEntry(
 	durationMs: number,
 	result: SyncResult | null,
 	fatalError: string | null,
-	isLogFile: (path: string) => boolean
+	isLogFile: (path: string) => boolean,
+	wikiLinks = false
 ): string | null {
 	const events = (result?.events ?? []).filter((e) => !isLogFile(e.path));
 	if (!fatalError && events.length === 0 && !(result?.errors.length)) return null;
@@ -100,8 +121,8 @@ export function formatEntry(
 	const order: SyncEvent["kind"][] = ["error", "marked", "copy", "merged", "delLocal", "delRemote", "down", "up"];
 	const sorted = [...events].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
 	for (const e of sorted.slice(0, MAX_FILES_PER_ENTRY)) {
-		let line = `- ${LABEL[e.kind]}: ${link(e.path)}`;
-		if (e.kind === "copy" && e.detail) line += ` (von ${link(e.detail)})`;
+		let line = `- ${LABEL[e.kind]}: ${link(e.path, wikiLinks)}`;
+		if (e.kind === "copy" && e.detail) line += ` (von ${link(e.detail, wikiLinks)})`;
 		if (e.kind === "error" && e.detail) line += ` – ${code(e.detail)}`;
 		lines.push(line);
 	}
@@ -122,9 +143,16 @@ function header(device: string): string {
 }
 
 /** Puts the new entry on top and keeps at most maxLines lines of entries. */
-export function addEntry(existing: string, entry: string, device: string, maxLines = LOG_MAX_LINES): string {
+export function addEntry(
+	existing: string,
+	entry: string,
+	device: string,
+	maxLines = LOG_MAX_LINES,
+	stripWikiLinks = true
+): string {
 	const firstEntry = existing.indexOf("\n## ");
-	const old = firstEntry >= 0 ? existing.slice(firstEntry + 1) : "";
+	let old = firstEntry >= 0 ? existing.slice(firstEntry + 1) : "";
+	if (stripWikiLinks && old) old = stripLogWikiLinks(old);
 	const entries = [entry, ...old.split(/\n(?=## )/).map((e) => e.trim()).filter(Boolean)];
 	const kept: string[] = [];
 	let lines = 0;

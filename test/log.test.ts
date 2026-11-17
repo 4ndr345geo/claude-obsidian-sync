@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { addEntry, formatEntry, logPath, makeLogMatcher } from "../src/log";
+import { addEntry, formatEntry, logPath, makeLogMatcher, stripLogWikiLinks } from "../src/log";
 import type { SyncResult } from "../src/sync";
 import { FakeDrive, buf, device } from "./fakes";
 
@@ -15,20 +15,26 @@ test("kein Eintrag, wenn nichts passiert ist oder nur Protokolle übertragen wur
   assert.equal(formatEntry(new Date(), 100, result([{ kind: "down", path: "Sync-Protokoll/iPad.md" }]), null, isLog), null);
 });
 
-test("Eintrag: Zusammenfassung, Fehler und Konflikte zuerst, Links zu Notizen", () => {
-  const e = formatEntry(new Date(2026, 10, 5, 14, 3, 12), 2100, result([
+test("Eintrag: standardmäßig ohne Wiki-Links (schont Graphensicht), optional mit Wiki-Links", () => {
+  const events: SyncResult["events"] = [
     { kind: "up", path: "Projekte/Idee.md" },
     { kind: "marked", path: "Einkauf.md" },
     { kind: "error", path: "bild.png", detail: "Google Drive Fehler 403" },
     { kind: "down", path: ".obsidian/app.json" },
-  ]), null, isLog)!;
+  ];
+  const e = formatEntry(new Date(2026, 10, 5, 14, 3, 12), 2100, result(events), null, isLog)!;
   const lines = e.split("\n");
   assert.equal(lines[0], "## 05.11.2026 14:03:12 · ❌ 2,1 s");
   assert.equal(lines[1], "- ↑ 1 · ↓ 1 · ⚠ 1 · ❌ 1");
   assert.equal(lines[2], "- ❌ Fehler: `bild.png` – `Google Drive Fehler 403`");
-  assert.equal(lines[3], "- ⚠ Konflikt in der Notiz markiert: [[Einkauf]]");
+  assert.equal(lines[3], "- ⚠ Konflikt in der Notiz markiert: `Einkauf.md`");
   assert.ok(e.includes("↓ heruntergeladen: `.obsidian/app.json`"));
-  assert.ok(e.includes("↑ hochgeladen: [[Projekte/Idee]]"));
+  assert.ok(e.includes("↑ hochgeladen: `Projekte/Idee.md`"));
+  assert.ok(!e.includes("[["));
+
+  const withLinks = formatEntry(new Date(2026, 10, 5, 14, 3, 12), 2100, result(events), null, isLog, true)!;
+  assert.ok(withLinks.includes("- ⚠ Konflikt in der Notiz markiert: [[Einkauf]]"));
+  assert.ok(withLinks.includes("↑ hochgeladen: [[Projekte/Idee]]"));
 });
 
 test("Abbruch wird protokolliert", () => {
@@ -36,13 +42,24 @@ test("Abbruch wird protokolliert", () => {
   assert.match(e, /❌ Synchronisierung abgebrochen: `Anmeldung bei Google fehlgeschlagen/);
 });
 
-test("neueste Einträge oben, alte werden entfernt", () => {
+test("neueste Einträge oben, alte werden entfernt und alte Wiki-Links werden bereinigt", () => {
   let text = "";
   for (let i = 1; i <= 300; i++) text = addEntry(text, `## Eintrag ${i}\n- ↑ 1`, "iPad", 100);
   const entries = text.match(/^## Eintrag \d+$/gm)!;
   assert.equal(entries[0], "## Eintrag 300");
   assert.ok(text.split("\n").length <= 110);
   assert.equal(text.match(/^# Sync-Protokoll – iPad$/gm)!.length, 1, "Kopfzeile nur einmal");
+
+  const legacy =
+    "# Sync-Protokoll – Laptop\n\n" +
+    "## 01.01.2026 12:00:00 · ✓ 1,0 s\n" +
+    "- ↑ hochgeladen: [[Projekte/Idee]]\n" +
+    "- ⚠ Konfliktkopie angelegt: [[Einkauf (Konflikt)]] (von [[Einkauf]])\n";
+  const cleaned = addEntry(legacy, "## 02.01.2026 12:00:00 · ✓ 0,5 s\n- ↑ hochgeladen: `Neu.md`", "Laptop");
+  assert.ok(!cleaned.includes("[["));
+  assert.ok(cleaned.includes("- ↑ hochgeladen: `Projekte/Idee.md`"));
+  assert.ok(cleaned.includes("- ⚠ Konfliktkopie angelegt: `Einkauf (Konflikt).md` (von `Einkauf.md`)"));
+  assert.equal(stripLogWikiLinks("- ↑ hochgeladen: [[Notiz]]"), "- ↑ hochgeladen: `Notiz.md`");
 });
 
 test("Dateiname aus Gerätenamen", () => {
@@ -66,7 +83,7 @@ test("zwei Geräte mit Protokoll schaukeln sich nicht gegenseitig auf", async ()
   for (let round = 0; round < 6; round++) for (const d of devs) await syncAndLog(d);
   assert.equal(writes, 2, "genau ein Eintrag pro Gerät (Laptop: ↑, iPad: ↓)");
   for (const d of devs) {
-    assert.ok(d.vault.text("Sync-Protokoll/Laptop.md")?.includes("↑ hochgeladen: [[Notiz]]"), d.name);
-    assert.ok(d.vault.text("Sync-Protokoll/iPad.md")?.includes("↓ heruntergeladen: [[Notiz]]"), d.name);
+    assert.ok(d.vault.text("Sync-Protokoll/Laptop.md")?.includes("↑ hochgeladen: `Notiz.md`"), d.name);
+    assert.ok(d.vault.text("Sync-Protokoll/iPad.md")?.includes("↓ heruntergeladen: `Notiz.md`"), d.name);
   }
 });

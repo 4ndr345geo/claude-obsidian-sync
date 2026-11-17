@@ -19,7 +19,7 @@ import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
 import { authorizeDesktop, exportConnection, importConnection } from "./auth";
 import { ConfigSyncOptions } from "./config";
-import { addEntry, formatDateTime, formatEntry, logPath, makeLogMatcher } from "./log";
+import { addEntry, formatDateTime, formatEntry, logPath, makeLogMatcher, stripLogWikiLinks } from "./log";
 import type { BackupEntry } from "./backup";
 import { Credentials, DriveClient, DriveError } from "./drive";
 import type { FailureEntry } from "./isolation";
@@ -42,6 +42,8 @@ interface Settings {
 	config: ConfigSyncOptions;
 	logEnabled: boolean;
 	logFolder: string;
+	/** Write [[Wiki-Links]] in sync logs (off by default so device logs do not clutter Graph View). */
+	logWikiLinks: boolean;
 	/** Random id of this installation; part of the keychain entry names. */
 	installId: string;
 	backupEnabled: boolean;
@@ -437,21 +439,56 @@ export default class DriveSyncPlugin extends Plugin {
 	private async writeLog(start: Date, result: SyncResult | null, fatal: string | null) {
 		if (!this.settings.logEnabled) return;
 		try {
-			const entry = formatEntry(start, Date.now() - start.getTime(), result, fatal, (p) => this.isLogFile(p));
-			if (!entry) return;
+			const wikiLinks = this.settings.logWikiLinks;
+			const entry = formatEntry(
+				start,
+				Date.now() - start.getTime(),
+				result,
+				fatal,
+				(p) => this.isLogFile(p),
+				wikiLinks
+			);
 			const path = this.ownLogPath();
 			const vault = this.app.vault;
 			const existing = vault.getAbstractFileByPath(path);
+			if (!entry) {
+				if (!wikiLinks && existing instanceof TFile) {
+					const cur = await vault.cachedRead(existing);
+					const cleaned = stripLogWikiLinks(cur);
+					if (cleaned !== cur) {
+						await vault.process(existing, (old) => stripLogWikiLinks(old));
+					}
+				}
+				return;
+			}
 			if (existing instanceof TFile) {
-				await vault.process(existing, (old) => addEntry(old, entry, this.settings.deviceName));
+				await vault.process(existing, (old) =>
+					addEntry(old, entry, this.settings.deviceName, undefined, !wikiLinks)
+				);
 				return;
 			}
 			const folder = this.settings.logFolder.replace(/^\/+|\/+$/g, "");
 			if (!vault.getAbstractFileByPath(folder)) await vault.createFolder(folder).catch(() => undefined);
-			await vault.create(path, addEntry("", entry, this.settings.deviceName));
+			await vault.create(path, addEntry("", entry, this.settings.deviceName, undefined, !wikiLinks));
 		} catch (e) {
 			console.error("[Google Drive Sync] Protokoll konnte nicht geschrieben werden", e);
 		}
+	}
+
+	async cleanAllLogWikiLinks(): Promise<number> {
+		const prefix = this.settings.logFolder.replace(/^\/+|\/+$/g, "") + "/";
+		const logFiles = this.app.vault
+			.getFiles()
+			.filter((f) => f.path.startsWith(prefix) && f.extension === "md");
+		let cleanedCount = 0;
+		for (const f of logFiles) {
+			const cur = await this.app.vault.cachedRead(f);
+			if (stripLogWikiLinks(cur) !== cur) {
+				await this.app.vault.process(f, (old) => stripLogWikiLinks(old));
+				cleanedCount++;
+			}
+		}
+		return cleanedCount;
 	}
 
 	async openLog() {
@@ -735,6 +772,7 @@ export default class DriveSyncPlugin extends Plugin {
 				showNotices: false,
 				logEnabled: true,
 				logFolder: "Sync-Protokoll",
+				logWikiLinks: false,
 				installId: "",
 				backupEnabled: true,
 				backupKeepDays: 30,
@@ -1327,6 +1365,30 @@ class DriveSyncSettingTab extends PluginSettingTab {
 						const folder = v.trim().replace(/^\/+|\/+$/g, "");
 						s.logFolder = isSafeSyncPath(folder, this.app.vault.configDir) ? folder : "Sync-Protokoll";
 						await p.saveAll();
+					})
+				);
+
+			new Setting(containerEl)
+				.setName("Wiki-Links im Sync-Protokoll verwenden")
+				.setDesc(
+					"Standardmäßig deaktiviert, damit Sync-Protokolle der Rechner nicht als riesige Knotenpunkte in der Graphensicht erscheinen. " +
+						"Deaktiviert werden Dateipfade als neutraler Text formatiert."
+				)
+				.addToggle((t) =>
+					t.setValue(s.logWikiLinks).onChange(async (v) => {
+						s.logWikiLinks = v;
+						await p.saveAll();
+						this.display();
+					})
+				)
+				.addButton((b) =>
+					b.setButtonText("Alte Links bereinigen").onClick(async () => {
+						const count = await p.cleanAllLogWikiLinks();
+						new Notice(
+							count > 0
+								? `${count} Protokolldatei(en) von Wiki-Links bereinigt ✓`
+								: "Alle Sync-Protokolle sind bereits bereinigt ✓"
+						);
 					})
 				);
 		}
