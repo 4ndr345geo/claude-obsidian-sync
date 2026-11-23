@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { exportConnection, importConnection } from "../src/auth";
+import {
+  exportConnection,
+  exportEncryptedConnection,
+  generatePairingPin,
+  importConnection,
+  importEncryptedConnection,
+  isEncryptedConnection,
+} from "../src/auth";
 import { makeConfigFilter } from "../src/config";
 import { mergeJson } from "../src/merge";
 import { cleanDeviceName, isSafeSyncPath } from "../src/paths";
@@ -91,6 +98,41 @@ test("Verbindungscode: nur gültige Codes werden angenommen", () => {
     enc(["id", "s", "t".repeat(5000)])]) {
     assert.throws(() => importConnection(bad), /Ungültiger Verbindungscode/, bad.slice(0, 40));
   }
+});
+
+test("Verschlüsselter Verbindungscode (ODS2): AES-GCM Roundtrip und Einmal-PIN", async () => {
+  const pin = generatePairingPin();
+  assert.match(pin, /^\d{6}$/);
+  const c = { clientId: "client-id.apps.googleusercontent.com", clientSecret: "sec-123", refreshToken: "1//ref-tok" };
+  const exported = await exportEncryptedConnection(c);
+  assert.match(exported.pin, /^\d{6}$/);
+  assert.ok(isEncryptedConnection(exported.code));
+  assert.ok(!exported.code.includes(c.refreshToken));
+  assert.ok(!exported.code.includes(c.clientSecret));
+  const decrypted = await importEncryptedConnection(exported.code, exported.pin);
+  assert.deepEqual(decrypted, c);
+  assert.throws(() => importConnection(exported.code), /Kopplungs-PIN erforderlich/);
+});
+
+test("Verschlüsselter Verbindungscode (ODS2): falscher PIN oder Manipulation wird abgewiesen", async () => {
+  const c = { clientId: "id", clientSecret: "sec", refreshToken: "tok" };
+  const { code, pin } = await exportEncryptedConnection(c, "654321");
+  assert.equal(pin, "654321");
+  await assert.rejects(importEncryptedConnection(code, "000000"), /Falscher Kopplungs-PIN/);
+  await assert.rejects(importEncryptedConnection(code, ""), /Kopplungs-PIN eingeben/);
+  const parts = code.split(".");
+  parts[2] = parts[2].slice(0, -2) + (parts[2].endsWith("AA") ? "BB" : "AA");
+  await assert.rejects(importEncryptedConnection(parts.join("."), "654321"), /Falscher Kopplungs-PIN/);
+  await assert.rejects(importEncryptedConnection("ODS2:invalid", "654321"), /Ungültiger Verbindungscode/);
+});
+
+test("Verschlüsselter Verbindungscode (ODS2): zwei Exporte erzeugen unterschiedliche Salze/IVs", async () => {
+  const c = { clientId: "id", clientSecret: "sec", refreshToken: "tok" };
+  const a = await exportEncryptedConnection(c, "112233");
+  const b = await exportEncryptedConnection(c, "112233");
+  assert.notEqual(a.code, b.code);
+  assert.deepEqual(await importEncryptedConnection(a.code, "112233"), c);
+  assert.deepEqual(await importEncryptedConnection(b.code, "112233"), c);
 });
 
 test("JSON-Merge: Schlüssel wie __proto__ und constructor bleiben reine Daten", () => {

@@ -86,10 +86,14 @@ das Refresh-Token (damit kann man dauerhaft auf den Sync-Ordner in Google Drive 
 
 **Alle Geräte teilen sich ein Token.** Geht ein Gerät verloren, kannst du direkt im Plugin **„Alle Geräte abmelden“** wählen (widerruft das Token sofort bei Google) oder den Zugriff unter <https://myaccount.google.com/permissions> entziehen und die übrigen Geräte neu verbinden. **„Dieses Gerät trennen“** löscht das Token nur lokal auf dem jeweiligen Gerät.
 
-**Verbindungscode und QR-Code enthalten den vollen Zugang.** Nicht fotografieren, nicht
-verschicken. Nach „Code kopieren“ wird die Zwischenablage nach 60 Sekunden geleert. Ein
-`obsidian://`-Link zum Verbinden wird nur angenommen, solange das Gerät **nicht** verbunden ist,
-und nie ohne Rückfrage mit Anzeige des Google-Kontos. Bestätige nur Codes, die du selbst erzeugt hast.
+**Verbindungscode und QR-Code sind per Einmal-PIN verschlüsselt (`ODS2:`).** Beim Erzeugen eines
+QR-Codes oder beim Kopieren des Verbindungscodes werden die Zugangsdaten lokal mit AES-256-GCM
+und einer zufälligen 6-stelligen Einmal-PIN (PBKDF2-SHA256) verschlüsselt. Die PIN wird nur auf
+dem Bildschirm angezeigt und ist weder im QR-Code noch in der Zwischenablage enthalten. Trotzdem
+QR-Code und PIN niemals gemeinsam fotografieren oder weitergeben. Nach „Code kopieren“ wird die
+Zwischenablage nach 60 Sekunden geleert. Ein `obsidian://`-Link zum Verbinden wird nur angenommen,
+solange das Gerät **nicht** verbunden ist, und nie ohne PIN-Eingabe und Rückfrage mit Anzeige des
+Google-Kontos. Bestätige nur Codes, die du selbst erzeugt hast.
 
 **Schutz vor manipulierten Dateien in Google Drive.** Dateinamen aus Drive werden geprüft, bevor
 etwas geschrieben wird. Ignoriert werden Pfade, die aus dem Vault herausführen (`../`), versteckte
@@ -243,12 +247,13 @@ und `main.js`, `manifest.json` und `styles.css` hineinkopieren. Danach Obsidian 
 
 **Auf Handy/Tablet, per QR-Code (empfohlen):** Auf dem Tablet/Handy Obsidian mit dem Vault öffnen
 (Plugin installiert und aktiviert). Am Computer auf **„QR-Code anzeigen“** klicken. Mit der
-**Kamera-App** des Tablets/Handys scannen und auf **„In Obsidian öffnen“** tippen. Obsidian zeigt, mit
-welchem Google-Konto verbunden wird, und fragt nach Bestätigung. Zwischenablage oder Tippen sind nicht nötig.
+**Kamera-App** des Tablets/Handys scannen und auf **„In Obsidian öffnen“** tippen. Danach die
+am Computer angezeigte **6-stellige Einmal-PIN** eingeben und das Google-Konto bestätigen.
 
-**Alternativ per Code:** Am Computer auf **„Code kopieren“** klicken und auf dem Gerät unter
-**„Verbindungscode einfügen“** übernehmen. Wenn das Einfügen am iPad/iPhone blockiert ist:
-iOS-Einstellungen → Obsidian → „Aus anderen Apps einfügen“ → „Erlauben“.
+**Alternativ per Code:** Am Computer auf **„Code kopieren“** klicken (kopiert den verschlüsselten
+`ODS2:`-Code und zeigt die Einmal-PIN an) und auf dem Gerät unter **„Verbindungscode einfügen“**
+übernehmen. Wenn das Einfügen am iPad/iPhone blockiert ist: iOS-Einstellungen → Obsidian →
+„Aus anderen Apps einfügen“ → „Erlauben“.
 
 ### 4. Erste Synchronisierung, so geht nichts schief
 

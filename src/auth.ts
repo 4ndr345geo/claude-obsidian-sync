@@ -104,23 +104,25 @@ export async function authorizeDesktop(clientId: string, clientSecret: string): 
 	return res.json.refresh_token;
 }
 
-const CODE_PREFIX = "ODS1:";
+const CODE_PREFIX_V1 = "ODS1:";
+const CODE_PREFIX_V2 = "ODS2:";
+const PBKDF2_ITERATIONS = 150_000;
+const SALT_BYTES = 16;
+const IV_BYTES = 12;
+const AAD_V2 = new TextEncoder().encode("ODS2");
 
-/** Connection code to transfer the login to phones/tablets. Contains secrets! */
-export function exportConnection(c: Credentials): string {
-	return CODE_PREFIX + btoa(JSON.stringify([c.clientId, c.clientSecret, c.refreshToken]));
-}
-
-export function importConnection(code: string): Credentials {
-	const trimmed = code.trim();
-	if (!trimmed.startsWith(CODE_PREFIX)) throw new Error("Ungültiger Verbindungscode.");
-	if (trimmed.length > 4000) throw new Error("Ungültiger Verbindungscode.");
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(atob(trimmed.slice(CODE_PREFIX.length)));
-	} catch {
+function decodeBase64Url(input: string): Uint8Array {
+	if (!/^[A-Za-z0-9_-]+$/.test(input)) {
 		throw new Error("Ungültiger Verbindungscode.");
 	}
+	const padded = input.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (input.length % 4)) % 4);
+	const bin = atob(padded);
+	const out = new Uint8Array(bin.length);
+	for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+	return out;
+}
+
+function validateCredentialsTuple(parsed: unknown): Credentials {
 	if (!Array.isArray(parsed) || parsed.length !== 3 || parsed.some((v) => typeof v !== "string")) {
 		throw new Error("Ungültiger Verbindungscode.");
 	}
@@ -131,4 +133,132 @@ export function importConnection(code: string): Credentials {
 		throw new Error("Ungültiger Verbindungscode.");
 	}
 	return { clientId, clientSecret, refreshToken };
+}
+
+/** Generates a uniformly distributed 6-digit numeric pairing PIN via WebCrypto CSPRNG. */
+export function generatePairingPin(): string {
+	const buf = new Uint32Array(1);
+	const limit = 4_294_000_000;
+	while (true) {
+		crypto.getRandomValues(buf);
+		if (buf[0] < limit) {
+			return String(buf[0] % 1_000_000).padStart(6, "0");
+		}
+	}
+}
+
+async function deriveAesKey(pin: string, salt: Uint8Array, usage: "encrypt" | "decrypt"): Promise<CryptoKey> {
+	const keyMaterial = await crypto.subtle.importKey(
+		"raw",
+		new TextEncoder().encode(pin),
+		"PBKDF2",
+		false,
+		["deriveKey"]
+	);
+	return crypto.subtle.deriveKey(
+		{ name: "PBKDF2", salt: salt as BufferSource, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+		keyMaterial,
+		{ name: "AES-GCM", length: 256 },
+		false,
+		[usage]
+	);
+}
+
+/** Returns true if the string is an encrypted ODS2 pairing code requiring a PIN. */
+export function isEncryptedConnection(code: string): boolean {
+	return code.trim().startsWith(CODE_PREFIX_V2);
+}
+
+/**
+ * Encrypts Google credentials with AES-256-GCM using a key derived from a one-time PIN (PBKDF2-SHA256).
+ * Safe to render as QR code or copy to clipboard as long as the PIN stays separate.
+ */
+export async function exportEncryptedConnection(
+	c: Credentials,
+	pin?: string
+): Promise<{ code: string; pin: string }> {
+	const resolvedPin = (pin ?? generatePairingPin()).trim();
+	if (resolvedPin.length < 4) {
+		throw new Error("Kopplungs-PIN muss mindestens 4 Zeichen lang sein.");
+	}
+	const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+	const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+	const key = await deriveAesKey(resolvedPin, salt, "encrypt");
+	const plaintext = new TextEncoder().encode(JSON.stringify([c.clientId, c.clientSecret, c.refreshToken]));
+	const cipherBuf = await crypto.subtle.encrypt(
+		{ name: "AES-GCM", iv, additionalData: AAD_V2 },
+		key,
+		plaintext
+	);
+	const cipherBytes = new Uint8Array(cipherBuf);
+	const code = `${CODE_PREFIX_V2}${base64url(salt)}.${base64url(iv)}.${base64url(cipherBytes)}`;
+	return { code, pin: resolvedPin };
+}
+
+/** Decrypts and validates an ODS2 pairing code using the provided PIN. */
+export async function importEncryptedConnection(code: string, pin: string): Promise<Credentials> {
+	const trimmed = code.trim();
+	const trimmedPin = pin.trim();
+	if (!trimmed.startsWith(CODE_PREFIX_V2) || trimmed.length > 4000) {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	if (!trimmedPin) {
+		throw new Error("Bitte Kopplungs-PIN eingeben.");
+	}
+	const parts = trimmed.slice(CODE_PREFIX_V2.length).split(".");
+	if (parts.length !== 3) {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	let salt: Uint8Array;
+	let iv: Uint8Array;
+	let cipherBytes: Uint8Array;
+	try {
+		salt = decodeBase64Url(parts[0]);
+		iv = decodeBase64Url(parts[1]);
+		cipherBytes = decodeBase64Url(parts[2]);
+	} catch {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	if (salt.length !== SALT_BYTES || iv.length !== IV_BYTES || cipherBytes.length < 17) {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	let plainBuf: ArrayBuffer;
+	try {
+		const key = await deriveAesKey(trimmedPin, salt, "decrypt");
+		plainBuf = await crypto.subtle.decrypt(
+			{ name: "AES-GCM", iv: iv as BufferSource, additionalData: AAD_V2 },
+			key,
+			cipherBytes as BufferSource
+		);
+	} catch {
+		throw new Error("Falscher Kopplungs-PIN oder beschädigter Verbindungscode.");
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(new TextDecoder().decode(plainBuf));
+	} catch {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	return validateCredentialsTuple(parsed);
+}
+
+/** Legacy unencrypted connection code format (kept for backward compatibility on import). */
+export function exportConnection(c: Credentials): string {
+	return CODE_PREFIX_V1 + btoa(JSON.stringify([c.clientId, c.clientSecret, c.refreshToken]));
+}
+
+export function importConnection(code: string): Credentials {
+	const trimmed = code.trim();
+	if (trimmed.startsWith(CODE_PREFIX_V2)) {
+		throw new Error("Für diesen verschlüsselten Verbindungscode (ODS2) ist ein Kopplungs-PIN erforderlich.");
+	}
+	if (!trimmed.startsWith(CODE_PREFIX_V1)) throw new Error("Ungültiger Verbindungscode.");
+	if (trimmed.length > 4000) throw new Error("Ungültiger Verbindungscode.");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(atob(trimmed.slice(CODE_PREFIX_V1.length)));
+	} catch {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
+	return validateCredentialsTuple(parsed);
 }

@@ -17,7 +17,13 @@ import {
 import { GDriveSyncDashboardView, VIEW_TYPE_GDRIVE_SYNC } from "./dashboardView";
 import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
-import { authorizeDesktop, exportConnection, importConnection } from "./auth";
+import {
+	authorizeDesktop,
+	exportEncryptedConnection,
+	importConnection,
+	importEncryptedConnection,
+	isEncryptedConnection,
+} from "./auth";
 import { ConfigSyncOptions } from "./config";
 import { addEntry, formatDateTime, formatEntry, logPath, makeLogMatcher, stripLogWikiLinks } from "./log";
 import type { BackupEntry } from "./backup";
@@ -542,8 +548,8 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 	}
 
-	connectionCode(): string {
-		return exportConnection({
+	async encryptedConnection(): Promise<{ code: string; pin: string }> {
+		return exportEncryptedConnection({
 			clientId: this.settings.clientId,
 			clientSecret: this.settings.clientSecret,
 			refreshToken: this.settings.refreshToken,
@@ -552,17 +558,35 @@ export default class DriveSyncPlugin extends Plugin {
 
 	/**
 	 * Takes over a connection code (pasted, or from a scanned QR code / tapped link).
+	 * Encrypted ODS2 codes require the separate one-time PIN before decrypting.
 	 * Always shows which Google account it belongs to and asks for confirmation,
 	 * so a foreign link can never silently connect this vault to someone else's Drive.
 	 */
 	async connectWithCode(code: string, onDone?: () => void) {
+		const trimmed = code.trim();
+		if (!trimmed) {
+			new Notice("Bitte einen Verbindungscode eingeben.");
+			return;
+		}
+		if (isEncryptedConnection(trimmed)) {
+			new PinPromptModal(
+				this.app,
+				async (pin) => importEncryptedConnection(trimmed, pin),
+				(creds) => this.verifyAndConfirmCredentials(creds, onDone)
+			).open();
+			return;
+		}
 		let creds: Credentials;
 		try {
-			creds = importConnection(code);
+			creds = importConnection(trimmed);
 		} catch (e) {
 			new Notice((e as Error).message);
 			return;
 		}
+		await this.verifyAndConfirmCredentials(creds, onDone);
+	}
+
+	private async verifyAndConfirmCredentials(creds: Credentials, onDone?: () => void): Promise<void> {
 		if (creds.refreshToken === this.settings.refreshToken) {
 			new Notice("Dieses Gerät ist bereits mit diesem Code verbunden ✓");
 			return;
@@ -661,10 +685,15 @@ export default class DriveSyncPlugin extends Plugin {
 	}
 
 	/**
-	 * Opens pairing QR modal
+	 * Opens pairing QR modal with AES-256-GCM encrypted ODS2 payload + one-time PIN
 	 */
-	showQrModal() {
-		new QrModal(this.app, this.connectionCode()).open();
+	async showQrModal(): Promise<void> {
+		try {
+			const { code, pin } = await this.encryptedConnection();
+			new QrModal(this.app, code, pin).open();
+		} catch (e) {
+			new Notice(`QR-Code konnte nicht erzeugt werden: ${(e as Error).message}`, 8000);
+		}
 	}
 
 	async openNote(path: string) {
@@ -890,7 +919,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 class QrModal extends Modal {
-	constructor(app: App, private code: string) {
+	constructor(app: App, private code: string, private pin: string) {
 		super(app);
 	}
 	onOpen() {
@@ -916,14 +945,115 @@ class QrModal extends Modal {
 		});
 		box.appendChild(contentEl.doc.importNode(svg, true));
 
+		const pinBox = contentEl.createDiv({ cls: "gdrive-pin-box" });
+		pinBox.createDiv({ cls: "gdrive-pin-label", text: "Einmal-PIN (nicht im QR-Code enthalten)" });
+		pinBox.createDiv({ cls: "gdrive-pin-value", text: `${this.pin.slice(0, 3)} ${this.pin.slice(3)}` });
+
 		const ol = contentEl.createEl("ol");
 		ol.createEl("li", { text: "Auf dem Tablet/Handy Obsidian mit dem richtigen Vault öffnen – das Plugin muss dort installiert und aktiviert sein." });
 		ol.createEl("li", { text: "Die Kamera-App öffnen und auf diesen QR-Code richten." });
-		ol.createEl("li", { text: "Auf den eingeblendeten Hinweis „In Obsidian öffnen“ tippen und bestätigen." });
+		ol.createEl("li", { text: "Auf „In Obsidian öffnen“ tippen, die Einmal-PIN eingeben und das Google-Konto bestätigen." });
 		contentEl.createEl("p", {
 			cls: "mod-warning",
-			text: "⚠ Der QR-Code enthält deinen Zugang. Keinen Screenshot teilen und das Fenster nach dem Scannen schließen.",
+			text: "🔒 Der QR-Code ist per AES-256-GCM verschlüsselt. Teile QR-Code und PIN niemals zusammen (kein gemeinsamer Screenshot) und schließe das Fenster nach dem Scannen.",
 		});
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class PairingPinModal extends Modal {
+	constructor(app: App, private pin: string) {
+		super(app);
+	}
+	onOpen() {
+		const { contentEl } = this;
+		this.titleEl.setText("Verschlüsselter Verbindungscode kopiert");
+		contentEl.createEl("p", {
+			text: "Der verschlüsselte Verbindungscode (ODS2) liegt in deiner Zwischenablage und wird nach 60 Sekunden automatisch gelöscht.",
+		});
+		const pinBox = contentEl.createDiv({ cls: "gdrive-pin-box" });
+		pinBox.createDiv({ cls: "gdrive-pin-label", text: "Einmal-PIN zum Entschlüsseln auf dem Zweitgerät" });
+		pinBox.createDiv({ cls: "gdrive-pin-value", text: `${this.pin.slice(0, 3)} ${this.pin.slice(3)}` });
+		contentEl.createEl("p", {
+			cls: "setting-item-description",
+			text: "Die PIN wird nicht mitkopiert. Gib sie auf dem Zielgerät ein, nachdem du dort den Code eingefügt hast.",
+		});
+		new Setting(contentEl).addButton((b) => b.setButtonText("Fertig").setCta().onClick(() => this.close()));
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class PinPromptModal extends Modal {
+	constructor(
+		app: App,
+		private decrypt: (pin: string) => Promise<Credentials>,
+		private onDecrypted: (creds: Credentials) => Promise<void>
+	) {
+		super(app);
+	}
+	onOpen() {
+		const { contentEl } = this;
+		this.titleEl.setText("Kopplungs-PIN eingeben");
+		contentEl.createEl("p", {
+			text: "Dieser Verbindungscode ist verschlüsselt (ODS2). Gib die 6-stellige Einmal-PIN ein, die auf dem anderen Gerät angezeigt wird.",
+		});
+
+		let pinValue = "";
+		let busy = false;
+		const errEl = contentEl.createDiv({ cls: "gdrive-pin-error" });
+		errEl.hide();
+
+		const submit = async () => {
+			if (busy) return;
+			const cleanPin = pinValue.replace(/\s+/g, "");
+			if (!cleanPin) {
+				errEl.setText("Bitte die Kopplungs-PIN eingeben.");
+				errEl.show();
+				return;
+			}
+			busy = true;
+			errEl.hide();
+			try {
+				const creds = await this.decrypt(cleanPin);
+				this.close();
+				await this.onDecrypted(creds);
+			} catch (e) {
+				errEl.setText((e as Error).message);
+				errEl.show();
+			} finally {
+				busy = false;
+			}
+		};
+
+		new Setting(contentEl)
+			.setName("Einmal-PIN")
+			.addText((t) => {
+				t.setPlaceholder("123 456").onChange((v) => {
+					pinValue = v;
+				});
+				t.inputEl.setAttribute("inputmode", "numeric");
+				t.inputEl.setAttribute("autocomplete", "one-time-code");
+				t.inputEl.addEventListener("keydown", (ev) => {
+					if (ev.key === "Enter") {
+						ev.preventDefault();
+						void submit();
+					}
+				});
+				window.setTimeout(() => t.inputEl.focus(), 0);
+			});
+
+		new Setting(contentEl)
+			.addButton((b) => b.setButtonText("Abbrechen").onClick(() => this.close()))
+			.addButton((b) =>
+				b
+					.setButtonText("Entschlüsseln")
+					.setCta()
+					.onClick(() => void submit())
+			);
 	}
 	onClose() {
 		this.contentEl.empty();
@@ -1223,21 +1353,21 @@ class DriveSyncSettingTab extends PluginSettingTab {
 			new Setting(containerEl)
 				.setName("Weiteres Gerät verbinden")
 				.setDesc(
-					"QR-Code mit der Kamera von iPad/iPhone/Android scannen – oder den Code kopieren und dort einfügen. " +
-						"Enthält deinen Zugang – nicht weitergeben!"
+					"QR-Code mit der Kamera von iPad/iPhone/Android scannen – oder den verschlüsselten Code (ODS2) kopieren. " +
+						"Geschützt durch eine 6-stellige Einmal-PIN."
 				)
 				.addButton((b) =>
 					b
 						.setButtonText("QR-Code anzeigen")
 						.setCta()
-						.onClick(() => new QrModal(this.app, p.connectionCode()).open())
+						.onClick(() => void p.showQrModal())
 				)
 				.addButton((b) =>
 					b.setButtonText("Code kopieren").onClick(async () => {
-						const copied = p.connectionCode();
+						const { code: copied, pin } = await p.encryptedConnection();
 						await navigator.clipboard.writeText(copied);
-						new Notice("Verbindungscode kopiert. Die Zwischenablage wird nach 60 Sekunden geleert.");
-						// Best effort: do not leave the access in the clipboard (history, cloud clipboard).
+						new PairingPinModal(this.app, pin).open();
+						// Best effort: do not leave the code in the clipboard (history, cloud clipboard).
 						window.setTimeout(async () => {
 							try {
 								if ((await navigator.clipboard.readText()) === copied) await navigator.clipboard.writeText("");
@@ -1253,9 +1383,9 @@ class DriveSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Verbindungscode einfügen")
 			.setDesc(
-				"Für Handy/Tablet. Einfacher: am Computer „QR-Code anzeigen“ wählen und mit der Kamera scannen."
+				"Für Handy/Tablet (unterstützt verschlüsselte ODS2:-Codes mit PIN sowie ältere ODS1:-Codes). Einfacher: am Computer „QR-Code anzeigen“ wählen."
 			)
-			.addText((t) => t.setPlaceholder("ODS1:…").onChange((v) => (code = v)))
+			.addText((t) => t.setPlaceholder("ODS2:…").onChange((v) => (code = v)))
 			.addButton((b) =>
 				b.setButtonText("Übernehmen").onClick(() => p.connectWithCode(code, () => this.display()))
 			);

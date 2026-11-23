@@ -226,3 +226,37 @@
   font-size: 0.8rem;
   color: var(--text-warning);
 }
+
+/* ODS2 Encrypted Pairing PIN Display */
+.gdrive-pin-box {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  margin: 0.75rem 0;
+  text-align: center;
+}
+
+.gdrive-pin-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.gdrive-pin-value {
+  font-family: var(--font-monospace);
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--text-accent);
+  user-select: all;
+}
+
+.gdrive-pin-error {
+  color: var(--text-error);
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
