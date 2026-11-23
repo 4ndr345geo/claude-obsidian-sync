@@ -149,6 +149,13 @@ export class DriveClient {
 		private online: () => boolean = browserOnline
 	) {}
 
+	/** Drops any cached access token and resumable upload sessions from memory. */
+	clearToken(): void {
+		this.accessToken = "";
+		this.expiresAt = 0;
+		this.sessions.clear();
+	}
+
 	transferTimeout(bytes: number | undefined): number {
 		if (bytes === undefined || !Number.isFinite(bytes)) return this.timeouts.max;
 		return Math.min(this.timeouts.max, this.timeouts.transferBase + (bytes / this.timeouts.bytesPerSecond) * 1000);
@@ -307,13 +314,14 @@ export class DriveClient {
 	 */
 	async folderUsable(folderId: string): Promise<boolean> {
 		try {
+			const safeId = checkId(folderId);
 			const res = await this.request({
-				url: `${API}/files/${encodeURIComponent(folderId)}?fields=id,trashed,mimeType`,
+				url: `${API}/files/${encodeURIComponent(safeId)}?fields=id,trashed,mimeType`,
 			});
 			const f = safeJson(res);
-			return f.id === folderId && f.trashed === false && f.mimeType === FOLDER_MIME;
+			return f.id === safeId && f.trashed === false && f.mimeType === FOLDER_MIME;
 		} catch (e) {
-			if (e instanceof DriveError && e.kind === "notFound") return false;
+			if (e instanceof DriveError && (e.kind === "notFound" || e.kind === "unexpected")) return false;
 			throw e;
 		}
 	}
@@ -416,7 +424,8 @@ export class DriveClient {
 
 	/** @param size expected size in bytes (sets the time limit) */
 	async download(id: string, size?: number): Promise<ArrayBuffer> {
-		const res = await this.request({ url: `${API}/files/${encodeURIComponent(id)}?alt=media` }, { bytes: size });
+		const safeId = checkId(id);
+		const res = await this.request({ url: `${API}/files/${encodeURIComponent(safeId)}?alt=media` }, { bytes: size });
 		return res.arrayBuffer;
 	}
 
@@ -429,10 +438,12 @@ export class DriveClient {
 		id?: string,
 		mtime?: number
 	): Promise<RemoteEntry> {
-		const metadata = buildMetadata(folderId, path, device, id, mtime);
+		const safeFolderId = checkId(folderId);
+		const safeId = id !== undefined ? checkId(id) : undefined;
+		const metadata = buildMetadata(safeFolderId, path, device, safeId, mtime);
 		const fields = `fields=${encodeURIComponent(FILE_FIELDS)}`;
-		const method = id ? "PATCH" : "POST";
-		const base = id ? `${UPLOAD}/files/${encodeURIComponent(id)}` : `${UPLOAD}/files`;
+		const method = safeId ? "PATCH" : "POST";
+		const base = safeId ? `${UPLOAD}/files/${encodeURIComponent(safeId)}` : `${UPLOAD}/files`;
 
 		if (data.byteLength <= MULTIPART_LIMIT) {
 			const boundary =
@@ -628,8 +639,9 @@ export class DriveClient {
 
 	/** Moves a file to the Google Drive trash (recoverable for 30 days). */
 	async trash(id: string): Promise<void> {
+		const safeId = checkId(id);
 		await this.request({
-			url: `${API}/files/${encodeURIComponent(id)}`,
+			url: `${API}/files/${encodeURIComponent(safeId)}`,
 			method: "PATCH",
 			contentType: "application/json",
 			body: JSON.stringify({ trashed: true }),

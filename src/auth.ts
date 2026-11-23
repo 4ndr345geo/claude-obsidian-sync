@@ -77,7 +77,10 @@ export async function authorizeDesktop(clientId: string, clientSecret: string): 
 				});
 				window.open(`${AUTH_URL}?${params.toString()}`);
 			});
-			server.on("error", reject);
+			server.on("error", (err) => {
+				clearTimeout(timer);
+				reject(err);
+			});
 		}
 	);
 
@@ -122,6 +125,10 @@ export function importConnection(code: string): Credentials {
 		throw new Error("Ungültiger Verbindungscode.");
 	}
 	const [clientId, clientSecret, refreshToken] = parsed as string[];
-	if (!clientId || !refreshToken) throw new Error("Ungültiger Verbindungscode.");
+	// eslint-disable-next-line no-control-regex
+	const hasControl = (v: string) => /[\u0000-\u001f\u007f]/.test(v);
+	if (!clientId || !refreshToken || hasControl(clientId) || hasControl(clientSecret) || hasControl(refreshToken)) {
+		throw new Error("Ungültiger Verbindungscode.");
+	}
 	return { clientId, clientSecret, refreshToken };
 }

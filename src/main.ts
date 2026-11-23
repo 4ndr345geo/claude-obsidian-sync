@@ -191,8 +191,10 @@ export default class DriveSyncPlugin extends Plugin {
 				const f = this.app.workspace.getActiveFile();
 				if (!f) return false;
 				if (!checking) {
-					void this.app.vault.read(f).then((content) => {
-						const xml = `<context>\n  <note path="${f.path}">\n${content}\n  </note>\n</context>`;
+					void this.app.vault.cachedRead(f).then((content) => {
+						const safePath = f.path.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+						const safeBody = content.replace(/\]\]>/g, "]]]]><![CDATA[>");
+						const xml = `<context>\n  <note path="${safePath}">\n<![CDATA[\n${safeBody}\n]]>\n  </note>\n</context>`;
 						void navigator.clipboard.writeText(xml);
 						new Notice(`Notiz [[${f.basename}]] als Claude-XML kopiert`);
 					});
@@ -208,7 +210,7 @@ export default class DriveSyncPlugin extends Plugin {
 				const files = this.app.vault.getMarkdownFiles();
 				const conflictList: TFile[] = [];
 				for (const f of files) {
-					const text = await this.app.vault.read(f);
+					const text = await this.app.vault.cachedRead(f);
 					if (hasConflictMarkers(text)) conflictList.push(f);
 				}
 				if (conflictList.length === 0) {
@@ -230,7 +232,7 @@ export default class DriveSyncPlugin extends Plugin {
 				const files = this.app.vault.getMarkdownFiles();
 				const conflictList: TFile[] = [];
 				for (const f of files) {
-					const text = await this.app.vault.read(f);
+					const text = await this.app.vault.cachedRead(f);
 					if (hasConflictMarkers(text)) conflictList.push(f);
 				}
 				if (conflictList.length === 0) {
@@ -248,13 +250,8 @@ export default class DriveSyncPlugin extends Plugin {
 		this.addCommand({
 			id: "disconnect-all-devices",
 			name: "Sync: Alle Geräte abmelden (Google-Zugriff widerrufen)",
-			callback: async () => {
-				const confirmed = confirm(
-					"Möchtest du wirklich alle Geräte abmelden?\n\nDie Google Drive-Autorisierung wird widerrufen und alle synchronisierenden Geräte werden abgemeldet."
-				);
-				if (confirmed) {
-					await this.disconnectAllDevices();
-				}
+			callback: () => {
+				this.confirmDisconnectAll();
 			},
 		});
 
@@ -476,10 +473,12 @@ export default class DriveSyncPlugin extends Plugin {
 	}
 
 	async cleanAllLogWikiLinks(): Promise<number> {
-		const prefix = this.settings.logFolder.replace(/^\/+|\/+$/g, "") + "/";
+		const folder = this.settings.logFolder.replace(/^\/+|\/+$/g, "");
+		if (!folder) return 0;
+		const matchLog = makeLogMatcher(folder);
 		const logFiles = this.app.vault
 			.getFiles()
-			.filter((f) => f.path.startsWith(prefix) && f.extension === "md");
+			.filter((f) => matchLog(f.path) && f.extension === "md");
 		let cleanedCount = 0;
 		for (const f of logFiles) {
 			const cur = await this.app.vault.cachedRead(f);
@@ -586,30 +585,58 @@ export default class DriveSyncPlugin extends Plugin {
 		}).open();
 	}
 
+	async disconnectLocalOnly(): Promise<void> {
+		this.settings.refreshToken = "";
+		if (!Platform.isDesktopApp) this.settings.clientSecret = "";
+		this.drive.clearToken();
+		this.massDelete = null;
+		this.authBroken = false;
+		this.lastError = "";
+		await this.saveAll();
+		this.renderStatus();
+	}
+
+	confirmDisconnectAll(onAfter?: () => void): void {
+		new ConfirmDisconnectModal(this.app, async () => {
+			await this.disconnectAllDevices();
+			onAfter?.();
+		}).open();
+	}
+
 	/**
 	 * Disconnects and logs out all synchronising devices by revoking the shared
-	 * Google OAuth token and clearing credentials.
+	 * Google OAuth token and clearing local credentials.
 	 */
 	async disconnectAllDevices(): Promise<boolean> {
 		const token = this.settings.refreshToken;
+		let revokedRemotely = !token;
 		if (token) {
 			try {
-				await requestUrl({
-					url: `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`,
+				const res = await requestUrl({
+					url: "https://oauth2.googleapis.com/revoke",
 					method: "POST",
-					headers: { "Content-Type": "application/x-www-form-urlencoded" },
+					contentType: "application/x-www-form-urlencoded",
+					body: new URLSearchParams({ token }).toString(),
+					throw: false,
 				});
+				revokedRemotely = res.status === 200;
+				if (!revokedRemotely) {
+					console.warn(`[Google Drive Sync] Token-Widerruf fehlgeschlagen (HTTP ${res.status})`);
+				}
 			} catch (e) {
-				console.warn("Could not revoke token with Google:", e);
+				console.warn("[Google Drive Sync] Token konnte bei Google nicht widerrufen werden:", e);
 			}
 		}
-		this.settings.refreshToken = "";
-		if (!Platform.isDesktopApp) this.settings.clientSecret = "";
-		this.massDelete = null;
-		await this.saveAll();
-		new Notice("Alle Geräte abgemeldet: Die Google Drive-Autorisierung wurde widerrufen.");
-		this.renderStatus();
-		return true;
+		await this.disconnectLocalOnly();
+		if (revokedRemotely) {
+			new Notice("Alle Geräte abgemeldet: Die Google Drive-Autorisierung wurde bei Google widerrufen ✓");
+		} else {
+			new Notice(
+				"⚠ Dieses Gerät wurde getrennt, aber das Token konnte bei Google nicht widerrufen werden (offline oder Fehler). Andere Geräte bleiben evtl. verbunden – bitte ggf. in den Google-Kontoeinstellungen prüfen.",
+				12000
+			);
+		}
+		return revokedRemotely;
 	}
 
 	/**
@@ -948,6 +975,39 @@ class ConfirmConnectModal extends Modal {
 	}
 }
 
+class ConfirmDisconnectModal extends Modal {
+	constructor(app: App, private onConfirm: () => void | Promise<void>) {
+		super(app);
+	}
+	onOpen() {
+		this.titleEl.setText("Alle Geräte abmelden?");
+		this.contentEl.createEl("p", {
+			text: "Das Google Drive OAuth-Token wird bei Google widerrufen. Alle verbundenen Geräte (Computer, Handy, Tablet) werden abgemeldet und können nicht mehr synchronisieren.",
+		});
+		this.contentEl.createEl("p", {
+			cls: "setting-item-description",
+			text: "Deine Notizen im lokalen Vault und in Google Drive bleiben vollständig erhalten.",
+		});
+		new Setting(this.contentEl)
+			.addButton((b) => {
+				b.setButtonText("Abbrechen").onClick(() => this.close());
+				window.setTimeout(() => b.buttonEl.focus(), 0);
+			})
+			.addButton((b) =>
+				b
+					.setButtonText("Alle Geräte abmelden")
+					.setWarning()
+					.onClick(async () => {
+						this.close();
+						await this.onConfirm();
+					})
+			);
+	}
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
 class DevicesOverviewModal extends Modal {
 	constructor(app: App, private plugin: DriveSyncPlugin) {
 		super(app);
@@ -957,10 +1017,11 @@ class DevicesOverviewModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 
-		const logFolder = this.plugin.settings.folderName ? this.plugin.settings.logFolder : "Sync-Protokoll";
+		const logFolder = (this.plugin.settings.logFolder || "Sync-Protokoll").replace(/^\/+|\/+$/g, "") || "Sync-Protokoll";
+		const ownLog = this.plugin.ownLogPath();
 		const files = this.app.vault.getFiles();
 		const logFiles = files.filter(
-			(f) => f.path.startsWith(logFolder + "/") && f.extension === "md"
+			(f) => f.path.startsWith(logFolder + "/") && !f.path.slice(logFolder.length + 1).includes("/") && f.extension === "md"
 		);
 
 		contentEl.createEl("p", {
@@ -980,11 +1041,11 @@ class DevicesOverviewModal extends Modal {
 		});
 
 		// Erkannte andere Geräte aus Log-Dateien
-		if (logFiles.length > 0) {
+		const otherLogs = logFiles.filter((f) => f.path !== ownLog);
+		if (otherLogs.length > 0) {
 			contentEl.createEl("h4", { text: "Erkannte synchronisierende Geräte im Vault:" });
-			for (const f of logFiles) {
+			for (const f of otherLogs) {
 				const devName = f.basename;
-				if (devName === currentDevice) continue;
 
 				const devEl = contentEl.createDiv({ cls: "setting-item" });
 				const devInfo = devEl.createDiv({ cls: "setting-item-info" });
@@ -1004,14 +1065,9 @@ class DevicesOverviewModal extends Modal {
 				b
 					.setButtonText("Alle Geräte abmelden")
 					.setWarning()
-					.onClick(async () => {
-						const ok = confirm(
-							"Möchtest du wirklich alle Geräte abmelden?\n\nDie Autorisierung bei Google wird widerrufen und alle verbundenen Geräte werden abgemeldet."
-						);
-						if (ok) {
-							this.close();
-							await this.plugin.disconnectAllDevices();
-						}
+					.onClick(() => {
+						this.close();
+						this.plugin.confirmDisconnectAll();
 					})
 			);
 	}
@@ -1234,12 +1290,8 @@ class DriveSyncSettingTab extends PluginSettingTab {
 						.setButtonText("Dieses Gerät trennen")
 						.setWarning()
 						.onClick(async () => {
-							s.refreshToken = "";
-							// On phones/tablets the secret only came from the connection code.
-							if (!Platform.isDesktopApp) s.clientSecret = "";
-							await p.saveAll();
+							await p.disconnectLocalOnly();
 							this.display();
-							p.renderStatus();
 						})
 				);
 
@@ -1250,14 +1302,8 @@ class DriveSyncSettingTab extends PluginSettingTab {
 					b
 						.setButtonText("Alle Geräte abmelden")
 						.setWarning()
-						.onClick(async () => {
-							const ok = confirm(
-								"Alle Geräte abmelden?\n\nDie Google Drive-Autorisierung wird widerrufen und alle verbundenen Geräte werden abgemeldet."
-							);
-							if (ok) {
-								await p.disconnectAllDevices();
-								this.display();
-							}
+						.onClick(() => {
+							p.confirmDisconnectAll(() => this.display());
 						})
 				);
 		}

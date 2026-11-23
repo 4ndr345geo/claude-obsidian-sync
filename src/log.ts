@@ -69,13 +69,17 @@ function link(path: string, wikiLinks = false): string {
  */
 export function stripLogWikiLinks(text: string): string {
 	return text.replace(
-		/^(- [^:\n]+: )\[\[([^\]\n`]+)\]\](.*)$/gm,
-		(_m, prefix: string, target: string, rest: string) => {
-			const cleanedRest = rest.replace(
-				/\(von \[\[([^\]\n`]+)\]\]\)/g,
-				(_m2: string, t2: string) => `(von ${code(t2 + ".md")})`
+		/^(- [^:\n]+: )(.*)$/gm,
+		(_m, prefix: string, rest: string) => {
+			let cleaned = rest.replace(
+				/^\[\[([^\]\n`]+)\]\]/,
+				(_m1: string, target: string) => code(`${target}.md`)
 			);
-			return `${prefix}${code(target + ".md")}${cleanedRest}`;
+			cleaned = cleaned.replace(
+				/\(von \[\[([^\]\n`]+)\]\]\)/g,
+				(_m2: string, t2: string) => `(von ${code(`${t2}.md`)})`
+			);
+			return `${prefix}${cleaned}`;
 		}
 	);
 }
@@ -135,9 +139,11 @@ export function formatEntry(
 }
 
 function header(device: string): string {
+	// eslint-disable-next-line no-control-regex
+	const safeDev = device.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/[[\]<>`]/g, "").trim() || "Gerät";
 	return (
-		`# Sync-Protokoll – ${device}\n\n` +
-		`> Neueste Einträge oben. Diese Datei schreibt nur das Gerät „${device}“. ` +
+		`# Sync-Protokoll – ${safeDev}\n\n` +
+		`> Neueste Einträge oben. Diese Datei schreibt nur das Gerät „${safeDev}“. ` +
 		`Ältere Einträge werden automatisch entfernt. Einträge entstehen nur, wenn etwas übertragen wurde oder ein Fehler auftrat.\n`
 	);
 }

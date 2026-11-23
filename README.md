@@ -16,6 +16,7 @@ und weiß so genau, was auf welchem Gerät geändert wurde.
 | **Unkritisch:** auf beiden Geräten dieselbe Änderung | wird einfach übernommen |
 | **Kritisch:** dieselbe Stelle auf beiden Geräten unterschiedlich geändert | **beide Versionen werden in der Notiz markiert**, siehe unten |
 | Bild, PDF o. Ä. auf zwei Geräten geändert | neuere Version behält den Namen, ältere wird als `bild (Konflikt Handy 2026-11-03 14-05).png` gespeichert |
+| Obsidian Canvas (`.canvas`) auf zwei Geräten geändert | Knoten und Kanten werden anhand eindeutiger IDs als JSON zusammengeführt |
 | Auf Gerät A gelöscht, auf Gerät B bearbeitet | bearbeitete Version bleibt erhalten |
 | Datei gelöscht | landet im Papierkorb (Obsidian bzw. Google Drive, 30 Tage wiederherstellbar) |
 
@@ -83,9 +84,7 @@ das Refresh-Token (damit kann man dauerhaft auf den Sync-Ordner in Google Drive 
   in fremde Hände geraten sein könnte: Zugriff unter <https://myaccount.google.com/permissions>
   widerrufen und neu verbinden.
 
-**Alle Geräte teilen sich ein Token.** Geht ein Gerät verloren, den Zugriff bei Google widerrufen
-(Link oben) und alle Geräte neu verbinden. „Verbindung trennen“ löscht das Token nur auf dem
-jeweiligen Gerät.
+**Alle Geräte teilen sich ein Token.** Geht ein Gerät verloren, kannst du direkt im Plugin **„Alle Geräte abmelden“** wählen (widerruft das Token sofort bei Google) oder den Zugriff unter <https://myaccount.google.com/permissions> entziehen und die übrigen Geräte neu verbinden. **„Dieses Gerät trennen“** löscht das Token nur lokal auf dem jeweiligen Gerät.
 
 **Verbindungscode und QR-Code enthalten den vollen Zugang.** Nicht fotografieren, nicht
 verschicken. Nach „Code kopieren“ wird die Zwischenablage nach 60 Sekunden geleert. Ein
@@ -230,11 +229,11 @@ einschalten, wenn dein Google-Konto gut geschützt ist (2-Faktor-Anmeldung).
 ### 2. Plugin installieren
 
 **Variante A, mit BRAT (empfohlen, funktioniert auch auf dem Handy):**
-Dieses Repository auf GitHub stellen und ein Release mit `main.js` und `manifest.json` anlegen.
+Dieses Repository auf GitHub stellen und ein Release mit `main.js`, `manifest.json` und `styles.css` anlegen.
 Dann in Obsidian das Community-Plugin **BRAT** installieren → „Add beta plugin“ → Repo-URL eingeben.
 
 **Variante B, manuell:** Den Ordner `<dein Vault>/.obsidian/plugins/gdrive-vault-sync/` anlegen
-und `main.js` und `manifest.json` hineinkopieren. Danach Obsidian neu laden und das Plugin unter
+und `main.js`, `manifest.json` und `styles.css` hineinkopieren. Danach Obsidian neu laden und das Plugin unter
 *Einstellungen → Community-Plugins* aktivieren.
 
 ### 3. Verbinden
@@ -373,14 +372,16 @@ synchronisiert, du kannst also z. B. am Computer nachlesen, was auf dem iPad pas
 ```markdown
 ## 05.11.2026 14:03:12 · ✓ 2,1 s
 - ↑ 1 · ↓ 2 · ⚠ 1
-- ⚠ Konflikt in der Notiz markiert: [[Einkauf]]
-- ↓ heruntergeladen: [[Projekte/Idee]]
+- ⚠ Konflikt in der Notiz markiert: `Einkauf.md`
+- ↓ heruntergeladen: `Projekte/Idee.md`
 - ↓ heruntergeladen: `.obsidian/app.json`
-- ↑ hochgeladen: [[Tagebuch/2026-11-05]]
+- ↑ hochgeladen: `Tagebuch/2026-11-05.md`
 ```
 
 - Einträge entstehen nur, wenn etwas übertragen wurde oder ein Fehler auftrat. Neueste stehen oben,
   alte werden automatisch entfernt (max. ca. 500 Zeilen).
+- Dateipfade erscheinen standardmäßig als neutraler Code (keine `[[Wiki-Links]]`), damit die Geräte-Protokolle
+  die Graphensicht nicht überfrachten. Falls gewünscht, lassen sich Wiki-Links in den Einstellungen aktivieren.
 - Zugangsdaten (Token, Secret, Verbindungscode) werden nie protokolliert.
 - Befehl: **„Sync-Protokoll dieses Geräts öffnen“**. Abschalten und Ordner ändern geht in den Plugin-Einstellungen.
 
@@ -413,5 +414,5 @@ Aufbau:
 2. Committen und auf `main` pushen.
 
 GitHub Actions merkt, dass es zu dieser Version noch kein Release gibt, testet und baut das Plugin
-und legt Tag und Release mit `main.js` und `manifest.json` an. BRAT installiert die neue Version
+und legt Tag und Release mit `main.js`, `manifest.json` und `styles.css` an. BRAT installiert die neue Version
 danach automatisch auf allen Geräten. Pushes ohne Versionsänderung erzeugen kein neues Release.

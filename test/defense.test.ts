@@ -30,11 +30,16 @@ test("Q-Injection: Werte können die Suchanfrage nicht verlassen", () => {
   }
 });
 
-test("Datei-IDs von Google werden streng geprüft", () => {
+test("Datei-IDs von Google werden streng geprüft", async () => {
   assert.equal(checkId("1AbC-_9"), "1AbC-_9");
   for (const bad of ["", "a'b", "a/b", "../x", "a b", "a\nb", 5, null, "x".repeat(201)]) {
     assert.throws(() => checkId(bad), DriveError, String(bad));
   }
+  const drive = new DriveClient(() => ({ clientId: "i", clientSecret: "s", refreshToken: "t" }), async () => {});
+  assert.equal(await drive.folderUsable("../evil"), false);
+  await assert.rejects(() => drive.download("../evil"), DriveError);
+  await assert.rejects(() => drive.trash("../evil"), DriveError);
+  await assert.rejects(() => drive.upload("../evil", "n.md", new ArrayBuffer(1), "PC"), DriveError);
 });
 
 test("Ausgehende Anfragen: nur HTTPS zu Google, keine Zeilenumbrüche in Headern", () => {

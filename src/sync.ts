@@ -2,7 +2,7 @@ import { App, normalizePath, TAbstractFile, TFile, TFolder } from "obsidian";
 import SparkMD5 from "spark-md5";
 import { DriveClient, DriveError } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
-import { conflictPath, isMergeable, mergeJson, mergeText } from "./merge";
+import { conflictPath, isMergeable, mergeCanvas, mergeJson, mergeText } from "./merge";
 import { BackupOptions, BackupStore } from "./backup";
 import { BACKUP_FOLDER } from "./config";
 import { Failures, FailureTracker, fingerprint } from "./isolation";
@@ -884,29 +884,38 @@ export class SyncEngine {
 		const localData = await this.vault.readBinary(file);
 		const remoteData = await this.downloadVerified(remoteId, remote);
 
-		// 1) Text notes: three-way merge. Uncritical changes are combined,
-		//    critical ones are marked directly in the note.
-		// Fallback: a note that is not valid UTF-8 text, or a merge that fails,
+		// 1) Text notes & Canvas: three-way merge. Uncritical changes are combined,
+		//    critical ones are marked directly in Markdown notes (or resolved via JSON IDs for .canvas).
+		// Fallback: a note that is not valid UTF-8 text, invalid Canvas JSON, or a merge that fails,
 		// is handled like an image – both versions are kept, nothing is mangled.
 		const small = localData.byteLength <= MAX_TEXT_BYTES && remoteData.byteLength <= MAX_TEXT_BYTES;
 		const texts = isMergeable(path) && small ? decodeStrict(localData, remoteData) : null;
-		let m: ReturnType<typeof mergeText> | null = null;
+		const isCanvas = path.toLowerCase().endsWith(".canvas");
+		let mergedText: string | null = null;
+		let mergedClean = true;
 		if (texts) {
 			try {
-				m = mergeText(
-					texts[0],
-					hasBase ? await this.readBaseText(path) : null,
-					texts[1],
-					{ label: this.settings().deviceName, time: file.stat.mtime },
-					{ label: remote?.device ?? "anderes Gerät", time: remote?.modifiedTime ?? 0 }
-				);
+				const baseText = hasBase ? await this.readBaseText(path) : null;
+				if (isCanvas) {
+					mergedText = mergeCanvas(texts[0], baseText, texts[1], file.stat.mtime >= (remote?.modifiedTime ?? 0));
+				} else {
+					const m = mergeText(
+						texts[0],
+						baseText,
+						texts[1],
+						{ label: this.settings().deviceName, time: file.stat.mtime },
+						{ label: remote?.device ?? "anderes Gerät", time: remote?.modifiedTime ?? 0 }
+					);
+					mergedText = m.text;
+					mergedClean = m.clean;
+				}
 			} catch (e) {
 				console.warn(`[Google Drive Sync] Zusammenführen von ${path} fehlgeschlagen, behalte beide Versionen`, e);
 			}
 		}
-		if (texts && m) {
+		if (texts && mergedText !== null) {
 			const localText = texts[0];
-			const merged = new TextEncoder().encode(m.text).buffer as ArrayBuffer;
+			const merged = new TextEncoder().encode(mergedText).buffer as ArrayBuffer;
 			await this.expectRemote(path, remoteId, md5(remoteData));
 			// Upload first. If it fails, nothing has changed on this device, and the
 			// next sync starts from the same state (otherwise the conflict marking
@@ -919,9 +928,9 @@ export class SyncEngine {
 				remoteId,
 				Date.now()
 			);
-			if (m.text !== localText) await this.writeLocal(path, merged);
+			if (mergedText !== localText) await this.writeLocal(path, merged);
 			await this.setBaseFromData(path, merged, entry.id);
-			if (m.clean) r.merged++;
+			if (mergedClean) r.merged++;
 			else r.marked.push(path);
 			return;
 		}

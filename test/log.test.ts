@@ -54,11 +54,14 @@ test("neueste Einträge oben, alte werden entfernt und alte Wiki-Links werden be
     "# Sync-Protokoll – Laptop\n\n" +
     "## 01.01.2026 12:00:00 · ✓ 1,0 s\n" +
     "- ↑ hochgeladen: [[Projekte/Idee]]\n" +
-    "- ⚠ Konfliktkopie angelegt: [[Einkauf (Konflikt)]] (von [[Einkauf]])\n";
-  const cleaned = addEntry(legacy, "## 02.01.2026 12:00:00 · ✓ 0,5 s\n- ↑ hochgeladen: `Neu.md`", "Laptop");
+    "- ⚠ Konfliktkopie angelegt: [[Einkauf (Konflikt)]] (von [[Einkauf]])\n" +
+    "- ⚠ Konfliktkopie angelegt: `bild (Konflikt).png` (von [[bild]])\n";
+  const cleaned = addEntry(legacy, "## 02.01.2026 12:00:00 · ✓ 0,5 s\n- ↑ hochgeladen: `Neu.md`", "Laptop [[Evil]]\n<script>");
   assert.ok(!cleaned.includes("[["));
+  assert.ok(!cleaned.includes("<script>"));
   assert.ok(cleaned.includes("- ↑ hochgeladen: `Projekte/Idee.md`"));
   assert.ok(cleaned.includes("- ⚠ Konfliktkopie angelegt: `Einkauf (Konflikt).md` (von `Einkauf.md`)"));
+  assert.ok(cleaned.includes("- ⚠ Konfliktkopie angelegt: `bild (Konflikt).png` (von `bild.md`)"));
   assert.equal(stripLogWikiLinks("- ↑ hochgeladen: [[Notiz]]"), "- ↑ hochgeladen: `Notiz.md`");
 });
 

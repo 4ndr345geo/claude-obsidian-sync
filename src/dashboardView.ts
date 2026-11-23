@@ -7,6 +7,8 @@ export const VIEW_TYPE_GDRIVE_SYNC = "gdrive-sync-dashboard-view";
 export class GDriveSyncDashboardView extends ItemView {
 	private plugin: DriveSyncPlugin;
 	private refreshTimer: number | null = null;
+	private closed = false;
+	private renderSeq = 0;
 
 	constructor(leaf: WorkspaceLeaf, plugin: DriveSyncPlugin) {
 		super(leaf);
@@ -26,6 +28,7 @@ export class GDriveSyncDashboardView extends ItemView {
 	}
 
 	async onOpen() {
+		this.closed = false;
 		await this.render();
 		// Auto refresh view every 15 seconds while open
 		this.refreshTimer = window.setInterval(() => {
@@ -34,6 +37,7 @@ export class GDriveSyncDashboardView extends ItemView {
 	}
 
 	async onClose() {
+		this.closed = true;
 		if (this.refreshTimer !== null) {
 			window.clearInterval(this.refreshTimer);
 			this.refreshTimer = null;
@@ -41,6 +45,8 @@ export class GDriveSyncDashboardView extends ItemView {
 	}
 
 	async render() {
+		if (this.closed) return;
+		const seq = ++this.renderSeq;
 		const container = this.containerEl.children[1] as HTMLElement;
 		if (!container) return;
 		container.empty();
@@ -48,7 +54,8 @@ export class GDriveSyncDashboardView extends ItemView {
 
 		const isConnected = this.plugin.isConnected();
 		const s = this.plugin.settings;
-		const logFolder = s.folderName ? s.logFolder : "Sync-Protokoll";
+		const logFolder = (s.logFolder || "Sync-Protokoll").replace(/^\/+|\/+$/g, "") || "Sync-Protokoll";
+		const ownLog = this.plugin.ownLogPath();
 		const currentDevice = s.deviceName || "Dieses Gerät";
 
 		// 1. Dashboard Header
@@ -66,7 +73,7 @@ export class GDriveSyncDashboardView extends ItemView {
 		metaRow.createSpan({ text: "·" });
 		metaRow.createSpan({ text: `Dieses Gerät: ${currentDevice}` });
 		metaRow.createSpan({ text: "·" });
-		metaRow.createSpan({ text: "Verschlüsselung: OAuth PKCE" });
+		metaRow.createSpan({ text: "Anmeldung: OAuth 2.0 (PKCE) · Transport: HTTPS" });
 
 		// 2. Primary Action Bar
 		const actionsBar = container.createDiv({ cls: "gdrive-dash-actions-bar" });
@@ -103,16 +110,10 @@ export class GDriveSyncDashboardView extends ItemView {
 				cls: "mod-warning gdrive-dash-btn is-danger",
 				text: "🚫 Alle Geräte abmelden",
 			});
-			disconnectAllBtn.onclick = async () => {
-				const confirmed = confirm(
-					"Möchtest du wirklich alle Geräte abmelden?\n\n" +
-					"Das Google Drive OAuth-Token wird widerrufen. Alle verbundenen Geräte (Computer, Handy, Tablet) werden sofort abgemeldet.\n\n" +
-					"Deine Notizen im lokalen Vault und in Google Drive bleiben unberührt."
-				);
-				if (confirmed) {
-					await this.plugin.disconnectAllDevices();
-					await this.render();
-				}
+			disconnectAllBtn.onclick = () => {
+				this.plugin.confirmDisconnectAll(() => {
+					void this.render();
+				});
 			};
 		}
 
@@ -123,23 +124,28 @@ export class GDriveSyncDashboardView extends ItemView {
 		// Collect other known devices from log folder
 		const files = this.app.vault.getFiles();
 		const logFiles = files.filter(
-			(f) => f.path.startsWith(logFolder + "/") && f.extension === "md"
+			(f) => f.path.startsWith(logFolder + "/") && !f.path.slice(logFolder.length + 1).includes("/") && f.extension === "md"
 		);
 
 		const remoteDevices: Array<{ name: string; mtime: number; path: string }> = [];
 		for (const f of logFiles) {
-			const name = f.basename;
-			if (name === currentDevice) continue;
+			if (f.path === ownLog) continue;
 			remoteDevices.push({
-				name,
+				name: f.basename,
 				mtime: f.stat.mtime,
 				path: f.path,
 			});
 		}
 
-		// Render interactive SVG Topology
+		// Render SVG Topology safely without innerHTML
 		const svgContainer = graphSection.createDiv({ cls: "gdrive-dash-svg-wrapper" });
-		svgContainer.innerHTML = this.generateTopologySvg(currentDevice, remoteDevices, isConnected);
+		const svgDoc = new DOMParser().parseFromString(
+			this.generateTopologySvg(currentDevice, remoteDevices, isConnected),
+			"image/svg+xml"
+		);
+		if (svgDoc.documentElement && svgDoc.documentElement.nodeName === "svg") {
+			svgContainer.appendChild(svgContainer.doc.importNode(svgDoc.documentElement, true));
+		}
 
 		// 4. Device Cards Grid
 		const devicesSection = container.createDiv({ cls: "gdrive-dash-devices-section" });
@@ -168,8 +174,7 @@ export class GDriveSyncDashboardView extends ItemView {
 			text: "Sync-Protokoll öffnen →",
 		});
 		localLogLink.onclick = async () => {
-			const path = `${logFolder}/${currentDevice}.md`;
-			await this.plugin.openNote(path);
+			await this.plugin.openNote(ownLog);
 		};
 
 		// Remote Device Cards
@@ -213,9 +218,11 @@ export class GDriveSyncDashboardView extends ItemView {
 		const conflictSection = container.createDiv({ cls: "gdrive-dash-conflicts-section" });
 		const conflictFiles: TFile[] = [];
 		for (const f of files.filter((f) => f.extension === "md")) {
-			const content = await this.app.vault.read(f);
+			if (this.closed || seq !== this.renderSeq) return;
+			const content = await this.app.vault.cachedRead(f);
 			if (hasConflictMarkers(content)) conflictFiles.push(f);
 		}
+		if (this.closed || seq !== this.renderSeq) return;
 
 		conflictSection.createEl("h3", { cls: "gdrive-dash-section-title", text: "Sync-Konflikt-Wächter" });
 		if (conflictFiles.length > 0) {

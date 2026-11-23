@@ -415,17 +415,26 @@ export function mergeCanvas(
 ): string | null {
 	let l: CanvasData, r: CanvasData, b: CanvasData | null = null;
 	try {
-		l = JSON.parse(local);
-		r = JSON.parse(remote);
-		if (base !== null) b = JSON.parse(base);
+		const parsedL: unknown = JSON.parse(local);
+		const parsedR: unknown = JSON.parse(remote);
+		if (!isPlainObject(parsedL) || !isPlainObject(parsedR)) return null;
+		l = parsedL as CanvasData;
+		r = parsedR as CanvasData;
+		if (base !== null) {
+			const parsedB: unknown = JSON.parse(base);
+			if (isPlainObject(parsedB)) b = parsedB as CanvasData;
+		}
 	} catch {
 		return null;
 	}
 
+	const asArr = <T extends { id?: unknown }>(v: unknown): T[] =>
+		Array.isArray(v) ? v.filter((item): item is T => isPlainObject(item) && typeof item.id === "string") : [];
+
 	// Merge nodes by ID
-	const baseNodes = new Map<string, CanvasNode>((b?.nodes ?? []).map((n) => [n.id, n]));
-	const localNodes = new Map<string, CanvasNode>((l.nodes ?? []).map((n) => [n.id, n]));
-	const remoteNodes = new Map<string, CanvasNode>((r.nodes ?? []).map((n) => [n.id, n]));
+	const baseNodes = new Map<string, CanvasNode>(asArr<CanvasNode>(b?.nodes).map((n) => [n.id, n]));
+	const localNodes = new Map<string, CanvasNode>(asArr<CanvasNode>(l.nodes).map((n) => [n.id, n]));
+	const remoteNodes = new Map<string, CanvasNode>(asArr<CanvasNode>(r.nodes).map((n) => [n.id, n]));
 
 	const mergedNodes: CanvasNode[] = [];
 	const allNodeIds = new Set([...localNodes.keys(), ...remoteNodes.keys()]);
@@ -462,9 +471,9 @@ export function mergeCanvas(
 	}
 
 	// Merge edges by ID
-	const baseEdges = new Map<string, CanvasEdge>((b?.edges ?? []).map((e) => [e.id, e]));
-	const localEdges = new Map<string, CanvasEdge>((l.edges ?? []).map((e) => [e.id, e]));
-	const remoteEdges = new Map<string, CanvasEdge>((r.edges ?? []).map((e) => [e.id, e]));
+	const baseEdges = new Map<string, CanvasEdge>(asArr<CanvasEdge>(b?.edges).map((e) => [e.id, e]));
+	const localEdges = new Map<string, CanvasEdge>(asArr<CanvasEdge>(l.edges).map((e) => [e.id, e]));
+	const remoteEdges = new Map<string, CanvasEdge>(asArr<CanvasEdge>(r.edges).map((e) => [e.id, e]));
 
 	const mergedEdges: CanvasEdge[] = [];
 	const allEdgeIds = new Set([...localEdges.keys(), ...remoteEdges.keys()]);
