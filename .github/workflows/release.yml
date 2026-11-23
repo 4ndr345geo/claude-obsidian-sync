@@ -69,7 +69,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           V: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$V" main.js manifest.json \
+          gh release create "$V" main.js manifest.json styles.css \
             --target "$GITHUB_SHA" \
             --title "$V" \
             --generate-notes
