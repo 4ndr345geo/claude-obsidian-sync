@@ -336,7 +336,7 @@ export class GDriveSyncDashboardView extends ItemView {
 					<circle r="38" fill="none" stroke="${activeColor}" stroke-width="1" stroke-dasharray="4 4" opacity="0.6" class="gdrive-pulse-ring" />
 					<text y="7" text-anchor="middle" font-size="20">☁️</text>
 					<text y="52" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">Google Drive Vault</text>
-					<text y="66" text-anchor="middle" font-size="10" fill="#94a3b8">drive.file</text>
+					<text y="66" text-anchor="middle" font-size="10" fill="#94a3b8">${this.escapeHtml(this.plugin.settings.grantedScope || this.plugin.settings.driveScope || "drive")}</text>
 				</g>
 
 				<!-- Device Nodes -->

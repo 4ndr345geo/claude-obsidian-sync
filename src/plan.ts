@@ -25,6 +25,8 @@ export interface RemoteEntry {
 	device?: string;
 	/** Size in bytes, if known (sets the time limit of the download) */
 	size?: number;
+	/** True when the file lives inside a real Google Drive subfolder (Drive name is basename only). */
+	inSubfolder?: boolean;
 }
 
 export interface BaseEntry {

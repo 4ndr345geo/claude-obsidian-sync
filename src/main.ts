@@ -19,10 +19,12 @@ import { hasConflictMarkers } from "./merge";
 import qrcode from "qrcode-generator";
 import {
 	authorizeDesktop,
+	DriveScope,
 	exportEncryptedConnection,
 	importConnection,
 	importEncryptedConnection,
 	isEncryptedConnection,
+	scopeUrl,
 } from "./auth";
 import { ConfigSyncOptions } from "./config";
 import { addEntry, formatDateTime, formatEntry, logPath, makeLogMatcher, stripLogWikiLinks } from "./log";
@@ -57,6 +59,10 @@ interface Settings {
 	backupMaxMB: number;
 	/** Memory guard: larger files are not synchronised on this device */
 	maxFileMB: number;
+	/** Google Drive OAuth scope mode: "drive" (full, sees Claude/Drive-created files) or "drive.file" (plugin-only). */
+	driveScope: DriveScope;
+	/** Actually granted scope of the active refresh token ("drive", "drive.file", or "" if legacy/unknown). */
+	grantedScope: string;
 }
 
 interface PluginData {
@@ -382,10 +388,20 @@ export default class DriveSyncPlugin extends Plugin {
 				this.statusEl.setText(`☁ ${msg}`);
 				progress?.setMessage(msg);
 			}, allowMassDelete, manual);
+			if (this.drive.lastTokenScope && this.settings.grantedScope !== this.drive.lastTokenScope) {
+				this.settings.grantedScope = this.drive.lastTokenScope;
+				await this.saveAll();
+			}
 			this.lastSync = Date.now();
 			this.lastError = result.errors[0] ?? "";
 			if (!this.lastError) this.lastReported = "";
 			this.report(result, manual);
+			if (manual && this.settings.driveScope === "drive" && this.settings.grantedScope === "drive.file") {
+				new Notice(
+					"Google Drive Sync: Die aktuelle Verbindung nutzt noch „drive.file“. Damit auch direkt in Drive (z. B. von Claude) erstellte .md-Dateien synchronisieren, einmalig in den Einstellungen auf „Verbinden“ klicken.",
+					12000
+				);
+			}
 			await this.writeLog(start, result, null);
 		} catch (e) {
 			this.lastError = (e as Error).message;
@@ -600,7 +616,11 @@ export default class DriveSyncPlugin extends Plugin {
 		}
 		new ConfirmConnectModal(this.app, email, this.isConnected(), async () => {
 			Object.assign(this.settings, creds);
+			this.settings.grantedScope = "";
+			this.drive.clearToken();
+			this.state.remote = undefined;
 			this.massDelete = null;
+			this.authBroken = false;
 			await this.saveAll();
 			new Notice(`Mit Google Drive verbunden ✓ (${email})`);
 			this.renderStatus();
@@ -609,10 +629,24 @@ export default class DriveSyncPlugin extends Plugin {
 		}).open();
 	}
 
+	async applyDesktopAuthorization(refreshToken: string): Promise<void> {
+		this.settings.refreshToken = refreshToken;
+		this.settings.grantedScope = this.settings.driveScope;
+		this.drive.clearToken();
+		this.state.remote = undefined;
+		this.massDelete = null;
+		this.authBroken = false;
+		this.lastError = "";
+		await this.saveAll();
+		this.renderStatus();
+	}
+
 	async disconnectLocalOnly(): Promise<void> {
 		this.settings.refreshToken = "";
+		this.settings.grantedScope = "";
 		if (!Platform.isDesktopApp) this.settings.clientSecret = "";
 		this.drive.clearToken();
+		this.state.remote = undefined;
 		this.massDelete = null;
 		this.authBroken = false;
 		this.lastError = "";
@@ -835,6 +869,8 @@ export default class DriveSyncPlugin extends Plugin {
 				backupMaxMB: 300,
 				// Phones and tablets have far less memory than computers.
 				maxFileMB: Platform.isMobile ? 200 : 2000,
+				driveScope: "drive",
+				grantedScope: "",
 				config: { enabled: false, settings: true, appearance: true, plugins: true },
 		};
 		this.settings = Object.assign({}, defaults, data.settings);
@@ -842,6 +878,8 @@ export default class DriveSyncPlugin extends Plugin {
 		for (const key of Object.keys(defaults) as (keyof Settings)[]) {
 			if (typeof this.settings[key] !== typeof defaults[key]) (this.settings as any)[key] = defaults[key];
 		}
+		if (this.settings.driveScope !== "drive" && this.settings.driveScope !== "drive.file") this.settings.driveScope = "drive";
+		if (this.settings.grantedScope !== "drive" && this.settings.grantedScope !== "drive.file") this.settings.grantedScope = "";
 		if (!isRecord(this.settings.config)) this.settings.config = defaults.config;
 		if (!(this.settings.backupKeepDays >= 1 && this.settings.backupKeepDays <= 365)) this.settings.backupKeepDays = 30;
 		if (!(this.settings.maxFileMB >= 10 && this.settings.maxFileMB <= 10000)) this.settings.maxFileMB = defaults.maxFileMB;
@@ -1325,6 +1363,32 @@ class DriveSyncSettingTab extends PluginSettingTab {
 				});
 			});
 			new Setting(containerEl)
+				.setName("Google-Drive-Berechtigung")
+				.setDesc(
+					"„Vollzugriff (drive)“ wird benötigt, damit auch direkt in Google Drive (z. B. von Claude oder im Browser) erstellte .md-Dateien und Unterordner synchronisiert werden. " +
+						"Nach einer Umstellung einmalig unten auf „Verbinden“ klicken (und in der Google Cloud Console unter Datenzugriff ggf. .../auth/drive hinzufügen)."
+				)
+				.addDropdown((d) =>
+					d
+						.addOption("drive", "Vollzugriff (drive) – für Claude & Drive-Web")
+						.addOption("drive.file", "Minimal (drive.file) – nur Plugin-Dateien")
+						.setValue(s.driveScope)
+						.onChange(async (v) => {
+							s.driveScope = v === "drive.file" ? "drive.file" : "drive";
+							await p.saveAll();
+							this.display();
+						})
+				);
+			if (p.isConnected() && s.driveScope === "drive" && s.grantedScope !== "drive") {
+				containerEl.createEl("p", {
+					cls: "mod-warning",
+					text:
+						s.grantedScope === "drive.file"
+							? "⚠ Die aktive Anmeldung nutzt noch „drive.file“: Dateien, die Claude oder Google Drive selbst erstellt haben, bleiben unsichtbar. Bitte jetzt einmalig auf „Verbinden“ klicken."
+							: "⚠ Bestehende Verbindung stammt aus einer älteren Version (vermutlich „drive.file“). Damit von Claude oder in Drive erstellte .md-Dateien synchronisiert werden, bitte einmalig auf „Verbinden“ klicken.",
+				});
+			}
+			new Setting(containerEl)
 				.setName(p.isConnected() ? "Neu verbinden" : "Mit Google Drive verbinden")
 				.setDesc("Öffnet den Browser zur Google-Anmeldung.")
 				.addButton((b) =>
@@ -1337,8 +1401,12 @@ class DriveSyncSettingTab extends PluginSettingTab {
 								return;
 							}
 							try {
-								s.refreshToken = await authorizeDesktop(s.clientId, s.clientSecret);
-								await p.saveAll();
+								const refreshToken = await authorizeDesktop(
+									s.clientId,
+									s.clientSecret,
+									scopeUrl(s.driveScope)
+								);
+								await p.applyDesktopAuthorization(refreshToken);
 								new Notice("Mit Google Drive verbunden ✓");
 								this.display();
 								p.sync(true);

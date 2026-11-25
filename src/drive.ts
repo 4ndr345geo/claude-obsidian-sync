@@ -8,8 +8,14 @@ const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
-const FILE_FIELDS = "id,name,md5Checksum,modifiedTime,appProperties,size";
+const GOOGLE_APPS_PREFIX = "application/vnd.google-apps.";
+const FILE_FIELDS = "id,name,mimeType,md5Checksum,modifiedTime,appProperties,size";
 const MULTIPART_LIMIT = 4 * 1024 * 1024;
+
+export interface DriveFolderMeta {
+	name: string;
+	parentId: string;
+}
 
 export interface Credentials {
 	clientId: string;
@@ -136,6 +142,10 @@ export class DriveClient {
 	private chunkedVerified = false;
 	/** Fallback active: piecewise uploads did not work here, large files go in one piece. */
 	chunkedUnsupported = false;
+	/** Scope reported by Google on the last access token refresh, if included in response. */
+	lastTokenScope: "drive" | "drive.file" | "" = "";
+	/** Subfolder hierarchy discovered during the most recent listFiles(folderId) call. */
+	private listedFolders = new Map<string, Record<string, DriveFolderMeta>>();
 	/** Interrupted large uploads, so the next attempt continues instead of starting over. Memory only. */
 	private sessions = new Map<string, { url: string; created: number }>();
 
@@ -153,7 +163,12 @@ export class DriveClient {
 	clearToken(): void {
 		this.accessToken = "";
 		this.expiresAt = 0;
+		this.lastTokenScope = "";
 		this.sessions.clear();
+	}
+
+	getListedFolders(folderId: string): Record<string, DriveFolderMeta> {
+		return this.listedFolders.get(folderId) ?? {};
 	}
 
 	transferTimeout(bytes: number | undefined): number {
@@ -248,6 +263,11 @@ export class DriveClient {
 		}
 		this.accessToken = accessToken;
 		this.expiresAt = Date.now() + (Number(json.expires_in) || 3600) * 1000;
+		if (typeof json.scope === "string") {
+			const scopes = json.scope.split(/\s+/);
+			if (scopes.includes("https://www.googleapis.com/auth/drive")) this.lastTokenScope = "drive";
+			else if (scopes.includes("https://www.googleapis.com/auth/drive.file")) this.lastTokenScope = "drive.file";
+		}
 		return this.accessToken;
 	}
 
@@ -350,75 +370,162 @@ export class DriveClient {
 
 	/**
 	 * Only what changed since `token` (instead of listing every file): files that
-	 * are new or changed in the sync folder, and ids of files that were removed,
-	 * trashed or moved out of it.
+	 * are new or changed in the sync folder (including real Drive subfolders),
+	 * and ids of files that were removed, trashed or moved out of it.
+	 * Sets `reset: true` when a subfolder inside the sync root changed so the
+	 * caller refreshes the full folder hierarchy.
 	 */
-	async listChanges(token: string, folderId: string): Promise<{ changed: RemoteEntry[]; removed: string[]; token: string }> {
-		const changed = new Map<string, RemoteEntry>();
-		const removed = new Set<string>();
+	async listChanges(
+		token: string,
+		folderId: string,
+		folders: Record<string, DriveFolderMeta> = {}
+	): Promise<{ changed: RemoteEntry[]; removed: string[]; token: string; reset?: boolean }> {
+		const rawChanges: Array<{ fileId?: unknown; removed?: boolean; file?: any }> = [];
 		let page = token;
+		let nextStartToken = "";
 		for (;;) {
 			const url =
 				`${API}/changes?pageToken=${encodeURIComponent(page)}&pageSize=1000&spaces=drive&includeRemoved=true` +
-				`&fields=${encodeURIComponent(`nextPageToken,newStartPageToken,changes(fileId,removed,file(${FILE_FIELDS},parents,trashed,mimeType))`)}`;
+				`&fields=${encodeURIComponent(`nextPageToken,newStartPageToken,changes(fileId,removed,file(${FILE_FIELDS},parents,trashed))`)}`;
 			const json = safeJson(await this.request({ url }));
 			if (!Array.isArray(json.changes)) throw new DriveError("Unerwartete Antwort von Google Drive (Änderungen).", 502, "unexpected");
-			for (const c of json.changes) {
-				if (typeof c?.fileId !== "string") continue;
-				const f = c.file;
-				const inFolder =
-					!c.removed && f && !f.trashed && f.mimeType !== FOLDER_MIME && Array.isArray(f.parents) && f.parents.includes(folderId);
-				let entry: RemoteEntry | null = null;
-				if (inFolder) {
-					try {
-						entry = toEntry(f);
-					} catch {
-						entry = null; // invalid id or name: treat like "not in the folder"
-					}
-				}
-				// The last change of a file in the list counts.
-				if (entry) {
-					changed.set(c.fileId, entry);
-					removed.delete(c.fileId);
-				} else {
-					changed.delete(c.fileId);
-					removed.add(c.fileId);
-				}
-			}
+			rawChanges.push(...json.changes);
 			if (typeof json.newStartPageToken === "string" && json.newStartPageToken) {
-				return { changed: [...changed.values()], removed: [...removed], token: json.newStartPageToken };
+				nextStartToken = json.newStartPageToken;
+				break;
 			}
 			if (typeof json.nextPageToken !== "string" || !json.nextPageToken) {
 				throw new DriveError("Unerwartete Antwort von Google Drive (Änderungen).", 502, "unexpected");
 			}
 			page = json.nextPageToken;
 		}
+
+		// Detect whether any subfolder belonging to `folderId` was created, renamed, moved, trashed, or removed.
+		const knownTreeIds = new Set<string>([folderId, ...Object.keys(folders)]);
+		const candidateFolders = new Map<string, string[]>();
+		for (const c of rawChanges) {
+			if (typeof c?.fileId !== "string") continue;
+			if (c.fileId in folders) {
+				return { changed: [], removed: [], token: nextStartToken, reset: true };
+			}
+			const f = c.file;
+			if (!c.removed && f && !f.trashed && f.mimeType === FOLDER_MIME && Array.isArray(f.parents)) {
+				candidateFolders.set(c.fileId, f.parents.filter((p: unknown): p is string => typeof p === "string"));
+			}
+		}
+		if (candidateFolders.size > 0) {
+			let grew = true;
+			while (grew) {
+				grew = false;
+				for (const [fid, parents] of candidateFolders) {
+					if (parents.some((p) => knownTreeIds.has(p))) {
+						return { changed: [], removed: [], token: nextStartToken, reset: true };
+					}
+					if (knownTreeIds.has(fid)) {
+						candidateFolders.delete(fid);
+						grew = true;
+					}
+				}
+			}
+		}
+
+		const changed = new Map<string, RemoteEntry>();
+		const removed = new Set<string>();
+		for (const c of rawChanges) {
+			if (typeof c?.fileId !== "string") continue;
+			const f = c.file;
+			const isGoogleApp = typeof f?.mimeType === "string" && f.mimeType.startsWith(GOOGLE_APPS_PREFIX);
+			const prefix =
+				!c.removed && f && !f.trashed && !isGoogleApp
+					? resolveSubfolderPrefix(f.parents, folderId, folders)
+					: null;
+			let entry: RemoteEntry | null = null;
+			if (prefix !== null) {
+				try {
+					entry = toEntry(f);
+					if (prefix) {
+						entry.path = `${prefix}/${entry.path}`;
+						entry.inSubfolder = true;
+					}
+				} catch {
+					entry = null; // invalid id or name: treat like "not in the folder"
+				}
+			}
+			// The last change of a file in the list counts.
+			if (entry) {
+				changed.set(c.fileId, entry);
+				removed.delete(c.fileId);
+			} else {
+				changed.delete(c.fileId);
+				removed.add(c.fileId);
+			}
+		}
+		return { changed: [...changed.values()], removed: [...removed], token: nextStartToken };
 	}
 
 	async listFiles(folderId: string): Promise<RemoteEntry[]> {
 		const out: RemoteEntry[] = [];
-		const query = `'${q(folderId)}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`;
-		let pageToken = "";
-		do {
-			const url =
-				`${API}/files?q=${encodeURIComponent(query)}&spaces=drive&pageSize=1000` +
-				`&fields=${encodeURIComponent(`nextPageToken,files(${FILE_FIELDS})`)}` +
-				(pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
-			const res = await this.request({ url });
-			// A list that cannot be read must stop the sync: an incomplete list
-			// would look as if the missing files had been deleted.
-			let page: any;
-			try {
-				page = res.json;
-			} catch {
-				page = null;
-			}
-			if (!page || !Array.isArray(page.files)) {
-				throw new DriveError("Unerwartete Antwort von Google Drive (Dateiliste).", res.status, "unexpected");
-			}
-			for (const f of page.files) out.push(toEntry(f));
-			pageToken = typeof page.nextPageToken === "string" ? page.nextPageToken : "";
-		} while (pageToken);
+		const folders: Record<string, DriveFolderMeta> = {};
+		const visited = new Set<string>([folderId]);
+		const queue: Array<{ id: string; prefix: string }> = [{ id: folderId, prefix: "" }];
+
+		while (queue.length > 0) {
+			const current = queue.shift()!;
+			const query = `'${q(current.id)}' in parents and trashed=false`;
+			let pageToken = "";
+			do {
+				const url =
+					`${API}/files?q=${encodeURIComponent(query)}&spaces=drive&pageSize=1000` +
+					`&fields=${encodeURIComponent(`nextPageToken,files(${FILE_FIELDS})`)}` +
+					(pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+				const res = await this.request({ url });
+				// A list that cannot be read must stop the sync: an incomplete list
+				// would look as if the missing files had been deleted.
+				let page: any;
+				try {
+					page = res.json;
+				} catch {
+					page = null;
+				}
+				if (!page || !Array.isArray(page.files)) {
+					throw new DriveError("Unerwartete Antwort von Google Drive (Dateiliste).", res.status, "unexpected");
+				}
+				for (const f of page.files) {
+					if (f?.mimeType === FOLDER_MIME) {
+						if (
+							typeof f.name === "string" &&
+							f.name &&
+							f.name !== "." &&
+							f.name !== ".." &&
+							// eslint-disable-next-line no-control-regex
+							!/[\u0000-\u001f\u007f]/.test(f.name)
+						) {
+							checkId(f.id);
+							folders[f.id] = { name: f.name, parentId: current.id };
+							if (!visited.has(f.id)) {
+								visited.add(f.id);
+								queue.push({ id: f.id, prefix: current.prefix ? `${current.prefix}/${f.name}` : f.name });
+							}
+						}
+						continue;
+					}
+					if (typeof f?.mimeType === "string" && f.mimeType.startsWith(GOOGLE_APPS_PREFIX)) {
+						console.warn(
+							`[Google Drive Sync] Google-Workspace-Datei übersprungen (nicht direkt herunterladbar): ${current.prefix ? `${current.prefix}/${f.name ?? f.id}` : (f.name ?? f.id)}`
+						);
+						continue;
+					}
+					const entry = toEntry(f);
+					if (current.prefix) {
+						entry.path = `${current.prefix}/${entry.path}`;
+						entry.inSubfolder = true;
+					}
+					out.push(entry);
+				}
+				pageToken = typeof page.nextPageToken === "string" ? page.nextPageToken : "";
+			} while (pageToken);
+		}
+		this.listedFolders.set(folderId, folders);
 		return out;
 	}
 
@@ -436,15 +543,17 @@ export class DriveClient {
 		data: ArrayBuffer,
 		device: string,
 		id?: string,
-		mtime?: number
+		mtime?: number,
+		inSubfolder = false
 	): Promise<RemoteEntry> {
 		const safeFolderId = checkId(folderId);
 		const safeId = id !== undefined ? checkId(id) : undefined;
-		const metadata = buildMetadata(safeFolderId, path, device, safeId, mtime);
+		const metadata = buildMetadata(safeFolderId, path, device, safeId, mtime, inSubfolder);
 		const fields = `fields=${encodeURIComponent(FILE_FIELDS)}`;
 		const method = safeId ? "PATCH" : "POST";
 		const base = safeId ? `${UPLOAD}/files/${encodeURIComponent(safeId)}` : `${UPLOAD}/files`;
 
+		let entry: RemoteEntry;
 		if (data.byteLength <= MULTIPART_LIMIT) {
 			const boundary =
 				"obsidian-drive-sync-" +
@@ -459,23 +568,28 @@ export class DriveClient {
 				},
 				{ bytes: body.byteLength }
 			);
-			return toEntry(safeJson(res));
+			entry = toEntry(safeJson(res));
+		} else if (this.chunkedUnsupported) {
+			entry = await this.uploadWhole(base, method, fields, metadata, data);
+		} else {
+			try {
+				entry = await this.uploadChunked(base, method, fields, metadata, data, folderId, path, id);
+			} catch (e) {
+				// Fallback: if piecewise uploading never worked on this device (e.g. the
+				// app does not pass Google's "308" answer through), send the file in one
+				// piece as earlier versions did, and keep doing so.
+				const suspicious = e instanceof DriveError && (e.network || e.kind === "unexpected");
+				if (this.chunkedVerified || !suspicious || !this.online()) throw e;
+				entry = await this.uploadWhole(base, method, fields, metadata, data);
+				this.chunkedUnsupported = true;
+				console.warn("[Google Drive Sync] Upload in Teilen funktioniert hier nicht, große Dateien werden am Stück gesendet.", e);
+			}
 		}
-
-		if (this.chunkedUnsupported) return this.uploadWhole(base, method, fields, metadata, data);
-		try {
-			return await this.uploadChunked(base, method, fields, metadata, data, folderId, path, id);
-		} catch (e) {
-			// Fallback: if piecewise uploading never worked on this device (e.g. the
-			// app does not pass Google's "308" answer through), send the file in one
-			// piece as earlier versions did, and keep doing so.
-			const suspicious = e instanceof DriveError && (e.network || e.kind === "unexpected");
-			if (this.chunkedVerified || !suspicious || !this.online()) throw e;
-			const entry = await this.uploadWhole(base, method, fields, metadata, data);
-			this.chunkedUnsupported = true;
-			console.warn("[Google Drive Sync] Upload in Teilen funktioniert hier nicht, große Dateien werden am Stück gesendet.", e);
-			return entry;
+		if (safeId && inSubfolder) {
+			entry.path = path;
+			entry.inSubfolder = true;
 		}
+		return entry;
 	}
 
 	/** Resumable upload in one request (no resuming after a dropout). */
@@ -672,18 +786,47 @@ export function buildMetadata(
 	path: string,
 	device: string,
 	id?: string,
-	mtime?: number
+	mtime?: number,
+	inSubfolder = false
 ): Record<string, unknown> {
 	const appProperties: Record<string, string | null> = {
 		device: truncateUtf8(device, APP_PROPERTY_LIMIT - "device".length),
 	};
 	// Remove the old, size-limited path property from files of earlier versions.
 	if (id) appProperties.vpath = null;
-	const metadata: Record<string, unknown> = { name: path, appProperties };
+	// Keep only the basename when updating a file inside a real Drive subfolder,
+	// so Drive does not rename "Notiz.md" inside "Claude/" into "Claude/Notiz.md".
+	const name = id && inSubfolder && path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
+	const metadata: Record<string, unknown> = { name, appProperties };
 	if (!id) metadata.parents = [folderId];
 	// Store the real edit time (not the upload time) so "newer wins" is fair.
 	if (mtime) metadata.modifiedTime = new Date(mtime).toISOString();
 	return metadata;
+}
+
+function resolveSubfolderPrefix(
+	parents: unknown,
+	folderId: string,
+	folders: Record<string, DriveFolderMeta>
+): string | null {
+	if (!Array.isArray(parents)) return null;
+	if (parents.includes(folderId)) return "";
+	for (const p of parents) {
+		if (typeof p !== "string" || !(p in folders)) continue;
+		const parts: string[] = [];
+		const seen = new Set<string>();
+		let cur = p;
+		while (cur && cur !== folderId) {
+			if (seen.has(cur)) return null;
+			seen.add(cur);
+			const meta = folders[cur];
+			if (!meta) return null;
+			parts.unshift(meta.name);
+			cur = meta.parentId;
+		}
+		if (cur === folderId && parts.length > 0) return parts.join("/");
+	}
+	return null;
 }
 
 /** "Range: bytes=0-524287" of a 308 answer -> 524288 (next byte to send). */

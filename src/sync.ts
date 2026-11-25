@@ -1,6 +1,6 @@
 import { App, normalizePath, TAbstractFile, TFile, TFolder } from "obsidian";
 import SparkMD5 from "spark-md5";
-import { DriveClient, DriveError } from "./drive";
+import { DriveClient, DriveError, DriveFolderMeta } from "./drive";
 import { ConfigSyncOptions, makeConfigFilter } from "./config";
 import { conflictPath, isMergeable, mergeCanvas, mergeJson, mergeText } from "./merge";
 import { BackupOptions, BackupStore } from "./backup";
@@ -34,6 +34,8 @@ export interface RemoteCache {
 	/** Last full listing (ms) */
 	fullAt: number;
 	files: Record<string, RemoteEntry>;
+	/** Subfolder hierarchy in Drive (used to resolve paths from listChanges without full scans). */
+	folders?: Record<string, DriveFolderMeta>;
 }
 
 /** A full listing now and then, in case the change feed missed something. */
@@ -572,14 +574,16 @@ export class SyncEngine {
 	 */
 	private async remoteFiles(folderId: string, full: boolean): Promise<RemoteEntry[]> {
 		const c = this.state.remote;
-		const due = !c || c.folderId !== folderId || !c.token || Date.now() - c.fullAt > FULL_LIST_EVERY;
+		const due = !c || c.folderId !== folderId || !c.token || !c.folders || Date.now() - c.fullAt > FULL_LIST_EVERY;
 		if (!full && !due && !this.changesUnavailable) {
 			try {
-				const ch = await this.drive.listChanges(c!.token, folderId);
-				for (const id of ch.removed) delete c!.files[id];
-				for (const e of ch.changed) c!.files[e.id] = e;
-				c!.token = ch.token;
-				return Object.values(c!.files);
+				const ch = await this.drive.listChanges(c!.token, folderId, c!.folders);
+				if (!ch.reset) {
+					for (const id of ch.removed) delete c!.files[id];
+					for (const e of ch.changed) c!.files[e.id] = e;
+					c!.token = ch.token;
+					return Object.values(c!.files);
+				}
 			} catch (e) {
 				// No connection etc.: the whole run stops anyway. Anything else: list everything.
 				if (e instanceof DriveError && e.network) throw e;
@@ -598,7 +602,16 @@ export class SyncEngine {
 			}
 		}
 		const list = await this.drive.listFiles(folderId);
-		this.state.remote = { folderId, token, fullAt: Date.now(), files: Object.fromEntries(list.map((e) => [e.id, e])) };
+		const folders =
+			(this.drive as { getListedFolders?: (id: string) => Record<string, DriveFolderMeta> }).getListedFolders?.(folderId) ??
+			{};
+		this.state.remote = {
+			folderId,
+			token,
+			fullAt: Date.now(),
+			files: Object.fromEntries(list.map((e) => [e.id, e])),
+			folders,
+		};
 		return list;
 	}
 
@@ -920,13 +933,15 @@ export class SyncEngine {
 			// Upload first. If it fails, nothing has changed on this device, and the
 			// next sync starts from the same state (otherwise the conflict marking
 			// would be merged again and again and the note would keep growing).
+			const inSubfolder = remote?.inSubfolder ?? this.state.remote?.files[remoteId]?.inSubfolder ?? false;
 			const entry = await this.drive.upload(
 				this.state.folderId,
 				path,
 				merged,
 				this.settings().deviceName,
 				remoteId,
-				Date.now()
+				Date.now(),
+				inSubfolder
 			);
 			if (mergedText !== localText) await this.writeLocal(path, merged);
 			await this.setBaseFromData(path, merged, entry.id);
@@ -1041,13 +1056,15 @@ export class SyncEngine {
 	private async uploadData(path: string, data: ArrayBuffer, remoteId?: string, expectedMd5?: string): Promise<void> {
 		if (remoteId) await this.expectRemote(path, remoteId, expectedMd5);
 		const st = await this.statLocal(path);
+		const inSubfolder = remoteId ? (this.state.remote?.files[remoteId]?.inSubfolder ?? false) : false;
 		const entry = await this.drive.upload(
 			this.state.folderId,
 			path,
 			data,
 			this.settings().deviceName,
 			remoteId,
-			st ? st.mtime : Date.now()
+			st ? st.mtime : Date.now(),
+			inSubfolder
 		);
 		await this.setBaseFromData(path, data, entry.id);
 	}

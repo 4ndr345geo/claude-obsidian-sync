@@ -1,6 +1,6 @@
 {
   "name": "gdrive-vault-sync",
-  "version": "1.9.4",
+  "version": "1.9.5",
   "description": "Obsidian plugin: sync vault via Google Drive",
   "directories": {
     "test": "test"

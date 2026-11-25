@@ -61,9 +61,11 @@ Geräteuhren können also nichts kaputt machen.
 Synchronisiert wird beim Start, 10 Sekunden nach dem Bearbeiten, alle 2 Minuten und beim
 Zurückkehren in die App (Handy). So sind die Geräte fast immer auf dem gleichen Stand.
 
-**Datenschutz:** Das Plugin nutzt die Berechtigung `drive.file`. Es sieht **nur die Dateien, die
-es selbst angelegt hat**, nicht den Rest deines Google Drive. Es gibt keinen fremden Server
-dazwischen: Die Daten gehen direkt von deinem Gerät zu Google.
+**Datenschutz:** Das Plugin unterstützt zwei Berechtigungsstufen: Standardmäßig nutzt es
+`drive` (**Vollzugriff**), damit auch **direkt in Google Drive oder über KI-Integrationen wie Claude erstellte
+`.md`-Dateien und Unterordner** synchronisiert werden können. Alternativ lässt sich in den Einstellungen
+`drive.file` wählen (sieht dann nur selbst angelegte Dateien – ideal, wenn keine externen Drive-Dateien nötig sind).
+Es gibt keinen fremden Server dazwischen: Die Daten gehen direkt von deinem Gerät zu Google.
 
 ## Sicherheit
 
@@ -222,10 +224,10 @@ einschalten, wenn dein Google-Konto gut geschützt ist (2-Faktor-Anmeldung).
 3. **Google Auth Platform / OAuth-Zustimmungsbildschirm** → Erste Schritte:
    - App-Name: z. B. „Obsidian Sync“, deine E-Mail eintragen
    - Zielgruppe: **Extern**
-   - Unter **Datenzugriff** den Bereich `.../auth/drive.file` hinzufügen
+   - Unter **Datenzugriff** den Bereich `.../auth/drive` hinzufügen (oder `.../auth/drive.file`, falls keine in Drive / von Claude erstellten Dateien synchronisiert werden sollen)
 4. Unter **Zielgruppe** auf **„App veröffentlichen“** klicken (Status „In Produktion“).
-   > Wichtig: Im Status „Test“ läuft die Anmeldung nach 7 Tagen ab. Für `drive.file` ist keine
-   > Prüfung durch Google nötig. Bei der Anmeldung erscheint evtl. „Google hat diese App nicht
+   > Wichtig: Im Status „Test“ läuft die Anmeldung nach 7 Tagen ab. Für deine eigene persönliche App ist keine
+   > Google-Verifizierung nötig. Bei der Anmeldung erscheint „Google hat diese App nicht
    > überprüft“: Über **Erweitert → Weiter zu Obsidian Sync** geht es weiter. Es ist ja deine eigene App.
 5. **Clients → Client erstellen** → Anwendungstyp **Desktop-App** → Erstellen.
    **Client-ID** und **Clientschlüssel** kopieren.

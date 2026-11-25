@@ -3,8 +3,18 @@ import type { Credentials } from "./drive";
 
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
-/** Only files created by this plugin are visible to it – the rest of your Drive stays private. */
-export const SCOPE = "https://www.googleapis.com/auth/drive.file";
+export type DriveScope = "drive" | "drive.file";
+
+/** Sees all files in Google Drive, including files/folders created directly in Drive or by tools like Claude. */
+export const SCOPE_DRIVE = "https://www.googleapis.com/auth/drive";
+/** Only files created by this plugin are visible to it – external Drive files remain invisible. */
+export const SCOPE_DRIVE_FILE = "https://www.googleapis.com/auth/drive.file";
+/** Default scope used for desktop OAuth authorization. */
+export const SCOPE = SCOPE_DRIVE;
+
+export function scopeUrl(mode: DriveScope): string {
+	return mode === "drive.file" ? SCOPE_DRIVE_FILE : SCOPE_DRIVE;
+}
 
 function base64url(bytes: Uint8Array): string {
 	let s = "";
@@ -16,7 +26,11 @@ function base64url(bytes: Uint8Array): string {
  * Desktop OAuth flow: opens the browser, receives the code on a temporary
  * local web server (127.0.0.1) and exchanges it for a refresh token.
  */
-export async function authorizeDesktop(clientId: string, clientSecret: string): Promise<string> {
+export async function authorizeDesktop(
+	clientId: string,
+	clientSecret: string,
+	scope: string = SCOPE_DRIVE
+): Promise<string> {
 	if (!Platform.isDesktopApp) {
 		throw new Error("Die Anmeldung ist nur am Computer möglich. Nutze auf dem Handy den Verbindungscode.");
 	}
@@ -68,7 +82,7 @@ export async function authorizeDesktop(clientId: string, clientSecret: string): 
 					client_id: clientId,
 					redirect_uri: redirectUri,
 					response_type: "code",
-					scope: SCOPE,
+					scope,
 					access_type: "offline",
 					prompt: "consent",
 					code_challenge: challenge,

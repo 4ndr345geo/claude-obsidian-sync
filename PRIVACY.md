@@ -23,10 +23,15 @@ betrieben.
 
 ## Zugriff auf Google Drive
 
-Das Plugin nutzt ausschließlich die Berechtigung
-`https://www.googleapis.com/auth/drive.file`. Damit kann es **nur Dateien sehen und
-ändern, die es selbst angelegt hat**. Auf andere Dateien in deinem Google Drive hat es
-keinen Zugriff.
+Das Plugin unterstützt zwei wählbare Berechtigungen in den Einstellungen:
+- **`https://www.googleapis.com/auth/drive` (Standard seit v1.9.5):** Erlaubt dem Plugin
+  auch Dateien und Unterordner zu lesen und zu synchronisieren, die direkt in Google Drive
+  oder von Dritt-Tools (z. B. Claude) im Sync-Ordner erstellt wurden.
+- **`https://www.googleapis.com/auth/drive.file` (Minimalmodus):** Beschränkt den Zugriff
+  ausschließlich auf Dateien, die das Plugin selbst angelegt hat.
+
+In beiden Modi gilt: Alle Daten verbleiben in deinem eigenen Google Drive; das Plugin liest
+nur deinen konfigurierten Sync-Ordner (Dateien außerhalb werden nicht verarbeitet).
 
 ## Weitergabe von Daten
 
